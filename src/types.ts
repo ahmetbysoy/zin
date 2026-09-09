@@ -2,7 +2,7 @@ export type BucketKey = 'shrimp' | 'crab' | 'whale' | 'leviathan';
 export type AllBucketTypes = BucketKey | string;
 
 export type TimeframeOption = '1m' | '5m' | '15m';
-export type ActiveTab = 'dashboard' | 'wallets' | 'stats' | 'logs' | 'settings';
+export type ActiveTab = 'dashboard' | 'chart' | 'wallets' | 'stats' | 'logs' | 'settings';
 export type SortOption = 'activity' | 'delta_desc' | 'delta_asc' | 'volume' | 'hierarchy';
 export type ThemeMode = 'dark' | 'light';
 

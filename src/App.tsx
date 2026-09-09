@@ -30,6 +30,7 @@ import { BucketList } from './components/BucketList';
 import { StatsView } from './components/StatsView';
 import { LogsView } from './components/LogsView';
 import { SettingsView } from './components/SettingsView';
+import { TradingViewChart } from './components/TradingViewChart';
 
 const QUICK_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT', '1000PEPEUSDT', 'TRBUSDT', 'XRPUSDT', 'BNBUSDT'];
 
@@ -224,6 +225,9 @@ export default function App() {
       tradeBatchRef.current = [];
       setCurrentPrice(null);
       prevPriceRef.current = null;
+      if (bucketManagerRef.current) {
+        setSortedBuckets(bucketManagerRef.current.getAllBucketsSorted(sortOption, appSettings.activeTimeframe, Date.now()));
+      }
     }
 
     setActiveSymbol(sym);
@@ -242,12 +246,13 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-pink-50/50 dark:bg-stone-950 text-stone-900 dark:text-stone-100 font-sans pb-24 transition-colors">
+    <div className={`min-h-screen ${activeTab === 'chart' ? 'bg-[#090a0f] h-screen overflow-hidden p-0 m-0' : 'bg-pink-50/50 dark:bg-stone-950 pb-24'} text-stone-900 dark:text-stone-100 font-sans transition-colors`}>
       
       {/* ==================================================================== */}
-      {/* TOP HEADER & STREAM CONTROL BAR */}
+      {/* TOP HEADER & STREAM CONTROL BAR (Grafik modunda tam ekran için gizlenir) */}
       {/* ==================================================================== */}
-      <header className="sticky top-0 z-30 bg-white/95 dark:bg-stone-900/95 backdrop-blur-md border-b border-rose-200/80 dark:border-stone-800 shadow-xs px-3 py-2.5 transition-colors">
+      {activeTab !== 'chart' && (
+        <header className="sticky top-0 z-30 bg-white/95 dark:bg-stone-900/95 backdrop-blur-md border-b border-rose-200/80 dark:border-stone-800 shadow-xs px-3 py-2.5 transition-colors">
         <div className="max-w-5xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-2.5">
           
           {/* Logo & Status Badge */}
@@ -367,11 +372,23 @@ export default function App() {
           ))}
         </div>
       </header>
+      )}
 
       {/* ==================================================================== */}
       {/* MAIN CONTENT AREA BY ACTIVE TAB */}
       {/* ==================================================================== */}
-      <main className="max-w-5xl mx-auto px-3 py-4">
+      <main className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'max-w-5xl mx-auto px-3 py-4'}>
+        {/* TradingView Chart Component (Keep-Alive: DOM'da kalıcı, sekmeler arası geçişte sıfırlanmaz) */}
+        <div className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'hidden'}>
+          <TradingViewChart
+            symbol={activeSymbol || 'BTCUSDT'}
+            wsManager={wsManagerRef.current!}
+            onBackToDashboard={() => setActiveTab('dashboard')}
+            isDark={appSettings.theme === 'dark'}
+            isActive={activeTab === 'chart'}
+          />
+        </div>
+
         {activeTab === 'dashboard' && (
           <Dashboard
             divergence={divergence}

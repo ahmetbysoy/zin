@@ -136,11 +136,16 @@ export class BucketManager {
     this.ringBuffer.clear();
     this.rollingTrades = [];
     this.stats = this.initializeStats();
+    this.dynamicThresholds = { ...this.staticThresholds };
+    this.lastMultiplier = 1;
     for (const b of this.customBuckets) {
       b.volume = 0;
       b.tradeCount = 0;
     }
     this.ensureStatsKeys();
+    if (this.onThresholdUpdate) {
+      this.onThresholdUpdate(this.dynamicThresholds, this.mode);
+    }
   }
 
   loadFromStorage(): void {
@@ -819,10 +824,11 @@ export class BucketManager {
   }
 }
 
-// 3. WEBSOCKET YÖNETİCİSİ - Otomatik Reconnect & Heartbeat
+// 3. WEBSOCKET YÖNETİCİSİ - Çift Hat: @trade + depth20 [public], kline/markPrice/forceOrder [market]
 export class WSManager {
   bucketManager: BucketManager;
-  ws: WebSocket | null = null;
+  publicWs: WebSocket | null = null;
+  marketWs: WebSocket | null = null;
   currentSymbol: string = '';
   isExplicitDisconnect: boolean = false;
 
@@ -837,8 +843,14 @@ export class WSManager {
   private heartbeatIntervalId: any = null;
 
   onTrade?: (trade: RecentTrade) => void;
+  onKline?: (candle: { time: number; open: number; high: number; low: number; close: number; volume: number; isClosed: boolean }) => void;
+  onForceOrder?: (order: { symbol: string; side: string; price: number; qty: number; time: number }) => void;
   onStatusChange?: (status: 'disconnected' | 'connecting' | 'connected' | 'error', message: string) => void;
   onLog?: (msg: string, type: 'info' | 'warn' | 'success' | 'error') => void;
+
+  get ws(): WebSocket | null {
+    return this.publicWs;
+  }
 
   constructor(bucketManager: BucketManager) {
     this.bucketManager = bucketManager;
@@ -917,85 +929,144 @@ export class WSManager {
   private startSocket(): void {
     if (!this.currentSymbol) return;
 
-    if (this.ws) {
+    if (this.publicWs) {
       try {
-        this.ws.onclose = null;
-        this.ws.onerror = null;
-        this.ws.close();
+        this.publicWs.onclose = null;
+        this.publicWs.onerror = null;
+        this.publicWs.close();
       } catch {}
-      this.ws = null;
+      this.publicWs = null;
+    }
+    if (this.marketWs) {
+      try {
+        this.marketWs.onclose = null;
+        this.marketWs.onerror = null;
+        this.marketWs.close();
+      } catch {}
+      this.marketWs = null;
     }
 
-    const tradeUrl = `wss://fstream.binance.com/ws/${this.currentSymbol}@trade`;
+    const sym = this.currentSymbol;
+
+    // 1. PUBLIC BAĞLANTI: @trade + depth20 (Public hat - canlı testte kesintisiz veri bastı)
+    const publicStreamUrl = `wss://fstream.binance.com/stream?streams=${sym}@trade/${sym}@depth20@100ms`;
     try {
-      this.ws = new WebSocket(tradeUrl);
+      this.publicWs = new WebSocket(publicStreamUrl);
     } catch (e: any) {
-      this.log(`❌ WS Başlatma Hatası: ${e.message}`, 'error');
+      this.log(`❌ Public WS Başlatma Hatası: ${e.message}`, 'error');
       this.handleReconnect();
       return;
     }
 
-    this.ws.onopen = () => {
+    this.publicWs.onopen = () => {
       this.reconnectAttempts = 0;
       this.lastMessageTime = Date.now();
-      this.log(`✅ WS BAĞLANDI: ${this.currentSymbol.toUpperCase()} Binance Futures stream canlı!`, 'success');
+      this.log(`✅ PUBLIC WS BAĞLANDI: ${sym.toUpperCase()} (@trade + depth20) canlı!`, 'success');
 
       if (this.onStatusChange) {
-        this.onStatusChange('connected', `Bağlı (${this.currentSymbol.toUpperCase()})`);
+        this.onStatusChange('connected', `Bağlı (${sym.toUpperCase()})`);
       }
     };
 
-    this.ws.onmessage = (event: MessageEvent) => {
+    this.publicWs.onmessage = (event: MessageEvent) => {
       this.lastMessageTime = Date.now();
       try {
-        const data = JSON.parse(event.data);
-        const price = parseFloat(data.p);
-        const qty = parseFloat(data.q);
-        const isBuyerMaker = Boolean(data.m);
-        const tradeTime = data.T || Date.now();
-        const tradeId = data.t || Date.now();
+        const raw = JSON.parse(event.data);
+        const data = raw.data || raw;
 
-        // tradeTime zorunlu parametre olarak verilir!
-        const { bucket, bucketName, bucketIcon, notionalValue } = this.bucketManager.processTrade(
-          price,
-          qty,
-          isBuyerMaker,
-          tradeTime
-        );
+        const isTrade = data.e === 'trade' || (typeof raw.stream === 'string' && raw.stream.endsWith('@trade'));
+        if (isTrade && data.p && data.q) {
+          const price = parseFloat(data.p);
+          const qty = parseFloat(data.q);
+          if (isNaN(price) || price <= 0 || isNaN(qty) || qty <= 0) return;
+          const isBuyerMaker = Boolean(data.m);
+          const tradeTime = data.T || Date.now();
+          const tradeId = data.t || Date.now();
 
-        if (this.onTrade) {
-          this.onTrade({
-            id: tradeId,
+          const { bucket, bucketName, bucketIcon, notionalValue } = this.bucketManager.processTrade(
             price,
             qty,
-            notional: notionalValue,
             isBuyerMaker,
-            time: tradeTime,
-            bucket,
-            bucketName,
-            bucketIcon,
-          });
+            tradeTime
+          );
+
+          if (this.onTrade) {
+            this.onTrade({
+              id: tradeId,
+              price,
+              qty,
+              notional: notionalValue,
+              isBuyerMaker,
+              time: tradeTime,
+              bucket,
+              bucketName,
+              bucketIcon,
+            });
+          }
         }
       } catch (err: any) {
-        console.error('Veri ayrıştırma hatası:', err);
+        console.error('Public WS ayrıştırma hatası:', err);
       }
     };
 
-    this.ws.onerror = () => {
-      this.log(`❌ WS HATA: ${this.currentSymbol.toUpperCase()} akışında kopma oldu!`, 'error');
+    this.publicWs.onerror = () => {
+      this.log(`❌ PUBLIC WS HATA: ${sym.toUpperCase()} akışında sorun!`, 'error');
       if (this.onStatusChange) {
-        this.onStatusChange('error', 'Bağlantı Hatası!');
+        this.onStatusChange('error', 'Public Bağlantı Hatası!');
       }
     };
 
-    this.ws.onclose = () => {
+    this.publicWs.onclose = () => {
       if (!this.isExplicitDisconnect) {
-        this.log(`⚠️ WS KOPTU: Yeniden bağlanılıyor...`, 'warn');
+        this.log(`⚠️ PUBLIC WS KOPTU: Yeniden bağlanılıyor...`, 'warn');
         this.handleReconnect();
       } else {
-        this.log(`ℹ️ WS KAPANDI: ${this.currentSymbol.toUpperCase()}`, 'info');
+        this.log(`ℹ️ PUBLIC WS KAPANDI: ${sym.toUpperCase()}`, 'info');
       }
     };
+
+    // 2. MARKET BAĞLANTI: kline_1m + markPrice + forceOrder (Market hat)
+    const marketStreamUrl = `wss://fstream.binance.com/stream?streams=${sym}@kline_1m/${sym}@markPrice@1s/${sym}@forceOrder`;
+    try {
+      this.marketWs = new WebSocket(marketStreamUrl);
+      this.marketWs.onopen = () => {
+        this.log(`✅ MARKET WS BAĞLANDI: ${sym.toUpperCase()} (kline + markPrice + forceOrder)`, 'success');
+      };
+      this.marketWs.onmessage = (event: MessageEvent) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const data = raw.data || raw;
+
+          if (data.e === 'kline' && data.k && this.onKline) {
+            const k = data.k;
+            this.onKline({
+              time: Math.floor(k.t / 1000),
+              open: parseFloat(k.o),
+              high: parseFloat(k.h),
+              low: parseFloat(k.l),
+              close: parseFloat(k.c),
+              volume: parseFloat(k.v),
+              isClosed: Boolean(k.x),
+            });
+          } else if (data.e === 'forceOrder' && data.o) {
+            const o = data.o;
+            const notional = Math.round(parseFloat(o.p) * parseFloat(o.q));
+            this.log(`⚡ LİKİDASYON: ${o.S === 'BUY' ? '🟢 SHORT' : '🔴 LONG'} $${notional.toLocaleString()} @ $${parseFloat(o.p).toFixed(2)}`, 'warn');
+            if (this.onForceOrder) {
+              this.onForceOrder({
+                symbol: o.s,
+                side: o.S,
+                price: parseFloat(o.p),
+                qty: parseFloat(o.q),
+                time: o.T || Date.now(),
+              });
+            }
+          }
+        } catch {}
+      };
+      this.marketWs.onerror = () => {};
+      this.marketWs.onclose = () => {};
+    } catch {}
   }
 
   // Exponential Backoff ile Otomatik Yeniden Bağlanma
@@ -1021,7 +1092,7 @@ export class WSManager {
   private startHeartbeatCheck(): void {
     if (this.heartbeatIntervalId) clearInterval(this.heartbeatIntervalId);
     this.heartbeatIntervalId = setInterval(() => {
-      if (this.isExplicitDisconnect || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.isExplicitDisconnect || !this.publicWs || this.publicWs.readyState !== WebSocket.OPEN) return;
       const silenceDuration = Date.now() - this.lastMessageTime;
       if (silenceDuration > 12_000) {
         this.log(`⏱️ Heartbeat Uyarısı: 12sn veri gelmedi, soket yenileniyor.`, 'warn');
@@ -1060,11 +1131,17 @@ export class WSManager {
       clearInterval(this.heartbeatIntervalId);
       this.heartbeatIntervalId = null;
     }
-    if (this.ws) {
+    if (this.publicWs) {
       try {
-        this.ws.close();
+        this.publicWs.close();
       } catch {}
-      this.ws = null;
+      this.publicWs = null;
+    }
+    if (this.marketWs) {
+      try {
+        this.marketWs.close();
+      } catch {}
+      this.marketWs = null;
     }
     if (this.onStatusChange) {
       this.onStatusChange('disconnected', 'Bağlantı Kesildi');

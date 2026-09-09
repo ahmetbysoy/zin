@@ -1,6 +1,7 @@
 import React from 'react';
 import { 
   BarChart3, 
+  CandlestickChart,
   Layers, 
   Settings, 
   Terminal, 
@@ -24,6 +25,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const tabs: Array<{ id: ActiveTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: string | number }> = [
     { id: 'dashboard', label: 'Dashboard', icon: TrendingUp },
+    { id: 'chart', label: 'Grafik', icon: CandlestickChart },
     { id: 'wallets', label: 'Kovalar', icon: Layers, badge: totalBuckets },
     { id: 'stats', label: 'İstatistik', icon: BarChart3 },
     { id: 'logs', label: 'Terminal', icon: Terminal },
@@ -31,7 +33,11 @@ export const Navbar: React.FC<NavbarProps> = ({
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-stone-900/95 backdrop-blur-md border-t border-rose-200/80 dark:border-stone-800 shadow-lg px-2 py-1.5 transition-colors">
+    <nav className={`fixed bottom-0 left-0 right-0 z-40 ${
+      activeTab === 'chart'
+        ? 'bg-[#090a0f]/95 border-t border-stone-800/80 shadow-2xl'
+        : 'bg-white/95 dark:bg-stone-900/95 border-t border-rose-200/80 dark:border-stone-800 shadow-lg'
+    } backdrop-blur-md px-2 py-1.5 transition-colors`}>
       <div className="max-w-4xl mx-auto flex items-center justify-between">
         {tabs.map((tab) => {
           const Icon = tab.icon;
