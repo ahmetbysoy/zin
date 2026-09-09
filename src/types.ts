@@ -1,16 +1,28 @@
-export type BucketKey = 'shrimp' | 'crab' | 'whale' | 'leviathan';
+export interface BucketConfig {
+  id: string;
+  name: string;
+  minUsdt: number;
+  maxUsdt: number;
+  color: string;
+  bgColor: string;
+  borderColor: string;
+  icon: string;
+  isSmartMoney?: boolean;
+}
 
 export interface BucketStats {
+  id: string;
+  name: string;
   buyVol: number;
   sellVol: number;
   count: number;
-  // 1-minute rolling window stats
-  rolling1mBuyVol?: number;
-  rolling1mSellVol?: number;
-  rolling1mCount?: number;
-  rolling1mDelta?: number;
-  directionalBias?: number; // 0-100
-  aggressionScore?: number; // 0-100
+  rolling1mBuyVol: number;
+  rolling1mSellVol: number;
+  rolling1mCount: number;
+  rolling1mDelta: number;
+  directionalBias: number; // 0-100
+  aggressionScore: number; // 0-100
+  config: BucketConfig;
 }
 
 export interface BucketThresholds {
@@ -23,7 +35,7 @@ export interface TimedTradeItem {
   time: number;
   notional: number;
   isBuyerMaker: boolean;
-  bucket: BucketKey;
+  bucketId: string;
 }
 
 export interface SmartMoneyDivergence {
@@ -42,12 +54,10 @@ export interface RecentTrade {
   notional: number;
   isBuyerMaker: boolean;
   time: number;
-  bucket: BucketKey;
+  bucketId: string;
+  bucketName: string;
+  bucketIcon: string;
 }
 
-export interface EngineStatsState {
-  shrimp: BucketStats;
-  crab: BucketStats;
-  whale: BucketStats;
-  leviathan: BucketStats;
-}
+export type ActiveTab = 'analysis' | 'wallets' | 'settings';
+export type SortOption = 'activity' | 'delta_desc' | 'delta_asc' | 'volume' | 'hierarchy';

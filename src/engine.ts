@@ -1,8 +1,62 @@
-import { BucketKey, BucketStats, BucketThresholds, EngineStatsState, RecentTrade } from './types';
+import { 
+  BucketConfig, 
+  BucketStats, 
+  RecentTrade, 
+  SmartMoneyDivergence, 
+  SortOption, 
+  TimedTradeItem 
+} from './types';
 
 // ========================================================================
-// 🧠 KARA PARA ÇEKİRDEK MOTORU (FAZA 1: DİNAMİK BUCKET & RING BUFFER)
+// 🧠 KARA PARA ÇEKİRDEK MOTORU (FAZA 3: DİNAMİK BUCKET, LOCALSTORAGE & SORTING)
 // ========================================================================
+
+export const DEFAULT_BUCKETS: BucketConfig[] = [
+  {
+    id: 'shrimp',
+    name: 'Karides (Noise)',
+    minUsdt: 0,
+    maxUsdt: 1000,
+    color: 'text-stone-700',
+    bgColor: 'bg-white/90',
+    borderColor: 'border-pink-200',
+    icon: '🦐',
+    isSmartMoney: false,
+  },
+  {
+    id: 'crab',
+    name: 'Yengeç (Mid-Tier)',
+    minUsdt: 1000,
+    maxUsdt: 10000,
+    color: 'text-rose-700',
+    bgColor: 'bg-rose-50/80',
+    borderColor: 'border-rose-200',
+    icon: '🦀',
+    isSmartMoney: false,
+  },
+  {
+    id: 'whale',
+    name: 'Balina (Smart Money)',
+    minUsdt: 10000,
+    maxUsdt: 100000,
+    color: 'text-pink-800',
+    bgColor: 'bg-pink-100/70',
+    borderColor: 'border-pink-300',
+    icon: '🐋',
+    isSmartMoney: true,
+  },
+  {
+    id: 'leviathan',
+    name: 'Leviathan (MM / Kurumsal)',
+    minUsdt: 100000,
+    maxUsdt: 1000000000,
+    color: 'text-purple-900',
+    bgColor: 'bg-purple-100/70',
+    borderColor: 'border-purple-300',
+    icon: '🦑',
+    isSmartMoney: true,
+  },
+];
 
 // 1. RING BUFFER (Bellek Sızıntısını Önleyen Sabit Boyutlu Dizi)
 export class RingBuffer {
@@ -13,7 +67,7 @@ export class RingBuffer {
 
   constructor(maxSize: number) {
     this.maxSize = maxSize;
-    this.buffer = new Float64Array(maxSize); // Sadece USDT değerlerini tutar, hafif ve hızlı
+    this.buffer = new Float64Array(maxSize);
     this.head = 0;
     this.count = 0;
   }
@@ -24,7 +78,6 @@ export class RingBuffer {
     if (this.count < this.maxSize) this.count++;
   }
 
-  // Tüm dolu elemanları döndür (Persentil hesaplamak için)
   getValues(): number[] {
     if (this.count < this.maxSize) {
       return Array.from(this.buffer.slice(0, this.count));
@@ -33,73 +86,111 @@ export class RingBuffer {
   }
 }
 
-// 2. DİNAMİK / STATİK BUCKET YÖNETİCİSİ (QUANTILE MOTOR)
+// 2. DİNAMİK / STATİK BUCKET YÖNETİCİSİ (LOCALSTORAGE KALICI HAFIZA)
 export class BucketManager {
   mode: 'dynamic' | 'static';
   ringBuffer: RingBuffer;
-  staticThresholds: BucketThresholds;
-  dynamicThresholds: BucketThresholds;
-  stats: EngineStatsState;
+  buckets: BucketConfig[] = [];
+  stats: Map<string, { buyVol: number; sellVol: number; count: number }> = new Map();
   lastBootstrapVolume: number = 0;
   lastMultiplier: number = 1.0;
-  onThresholdUpdate?: (thresholds: BucketThresholds, mode: string) => void;
-
-  // 1-minute rolling trades for trend & aggression analysis
-  rollingTrades: Array<{ time: number; notional: number; isBuyerMaker: boolean; bucket: BucketKey }> = [];
+  
+  // 1-dakikalık kayan pencere
+  rollingTrades: TimedTradeItem[] = [];
   lastPruneTime: number = 0;
 
+  onBucketsChange?: (buckets: BucketConfig[]) => void;
+  onThresholdUpdate?: (buckets: BucketConfig[], mode: string) => void;
+
   constructor() {
-    this.mode = 'dynamic'; // 'dynamic' veya 'static'
-    this.ringBuffer = new RingBuffer(500); // Son 500 işlemin USDT değeri
-    this.rollingTrades = [];
-
-    // Varsayılan Statik Eşikler (Fallback)
-    this.staticThresholds = {
-      shrimpMax: 1000,
-      crabMax: 10000,
-      whaleMax: 100000,
-      // Leviathan: > 100000
-    };
-
-    // Dinamik Eşikler (Canlı hesaplanacak)
-    this.dynamicThresholds = {
-      shrimpMax: 1000,
-      crabMax: 10000,
-      whaleMax: 100000,
-    };
-
-    // Cüzdan İstatistikleri (Sıfırlanabilir)
-    this.stats = {
-      shrimp: { buyVol: 0, sellVol: 0, count: 0 },
-      crab: { buyVol: 0, sellVol: 0, count: 0 },
-      whale: { buyVol: 0, sellVol: 0, count: 0 },
-      leviathan: { buyVol: 0, sellVol: 0, count: 0 },
-    };
+    this.mode = 'dynamic';
+    this.ringBuffer = new RingBuffer(500);
+    this.loadBucketsFromStorage();
     this.resetStats();
   }
 
-  resetStats(): void {
-    this.stats = {
-      shrimp: { buyVol: 0, sellVol: 0, count: 0 },
-      crab: { buyVol: 0, sellVol: 0, count: 0 },
-      whale: { buyVol: 0, sellVol: 0, count: 0 },
-      leviathan: { buyVol: 0, sellVol: 0, count: 0 },
+  // --- LOCAL STORAGE ENTEGRASYONU ---
+  loadBucketsFromStorage(): void {
+    try {
+      const stored = localStorage.getItem('kara_para_buckets');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          this.buckets = parsed;
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ LocalStorage okunamadı, varsayılanlar yükleniyor:', e);
+    }
+    this.buckets = JSON.parse(JSON.stringify(DEFAULT_BUCKETS));
+  }
+
+  saveBucketsToStorage(): void {
+    try {
+      localStorage.setItem('kara_para_buckets', JSON.stringify(this.buckets));
+    } catch (e) {
+      console.error('❌ LocalStorage yazılamadı:', e);
+    }
+    if (this.onBucketsChange) {
+      this.onBucketsChange(this.getBuckets());
+    }
+  }
+
+  getBuckets(): BucketConfig[] {
+    return [...this.buckets];
+  }
+
+  addBucket(newBucket: BucketConfig): void {
+    // Unique ID garanti et
+    const id = newBucket.id || `b_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+    const bucket: BucketConfig = {
+      ...newBucket,
+      id,
     };
-    this.ringBuffer = new RingBuffer(500); // Buffer'ı da sıfırla
+    this.buckets.push(bucket);
+    this.sortBuckets();
+    this.saveBucketsToStorage();
+    this.resetStats();
+  }
+
+  removeBucket(id: string): void {
+    if (this.buckets.length <= 1) {
+      alert('En az 1 adet kova kalmalıdır!');
+      return;
+    }
+    this.buckets = this.buckets.filter((b) => b.id !== id);
+    this.saveBucketsToStorage();
+    this.resetStats();
+  }
+
+  resetToDefaults(): void {
+    this.buckets = JSON.parse(JSON.stringify(DEFAULT_BUCKETS));
+    this.saveBucketsToStorage();
+    this.resetStats();
+  }
+
+  sortBuckets(): void {
+    this.buckets.sort((a, b) => a.minUsdt - b.minUsdt);
+  }
+
+  resetStats(): void {
+    this.stats.clear();
+    for (const b of this.buckets) {
+      this.stats.set(b.id, { buyVol: 0, sellVol: 0, count: 0 });
+    }
+    this.ringBuffer = new RingBuffer(500);
     this.rollingTrades = [];
   }
 
   setMode(newMode: 'dynamic' | 'static'): void {
     this.mode = newMode;
     if (this.onThresholdUpdate) {
-      this.onThresholdUpdate(
-        this.mode === 'dynamic' ? this.dynamicThresholds : this.staticThresholds,
-        this.mode
-      );
+      this.onThresholdUpdate(this.getBuckets(), this.mode);
     }
   }
 
-  // 24s Hacim Bootstrap (İlk açılışta kör kalmamak için)
+  // 24s Hacim Bootstrap (İlk açılışta ölçekleme)
   applyBootstrap(dailyQuoteVolume: number): void {
     this.lastBootstrapVolume = dailyQuoteVolume;
     if (this.mode !== 'dynamic') return;
@@ -107,97 +198,129 @@ export class BucketManager {
     let multiplier = 1.0;
     if (dailyQuoteVolume > 1000000000) multiplier = 5.0; // > $1B (BTC, ETH)
     else if (dailyQuoteVolume > 100000000) multiplier = 1.0; // $100M - $1B (SOL, BNB)
-    else multiplier = 0.2; // < $100M (Altcoinler, Meme'ler)
+    else multiplier = 0.2; // < $100M (Küçük altcoinler)
 
     this.lastMultiplier = multiplier;
-    this.dynamicThresholds.shrimpMax = 1000 * multiplier;
-    this.dynamicThresholds.crabMax = 10000 * multiplier;
-    this.dynamicThresholds.whaleMax = 100000 * multiplier;
+
+    // Eğer 4 standart kova varsa bootstrap'a göre aralıkları ayarla
+    if (this.buckets.length === 4) {
+      this.buckets[0].maxUsdt = Math.round(1000 * multiplier);
+      this.buckets[1].minUsdt = this.buckets[0].maxUsdt;
+      this.buckets[1].maxUsdt = Math.round(10000 * multiplier);
+      this.buckets[2].minUsdt = this.buckets[1].maxUsdt;
+      this.buckets[2].maxUsdt = Math.round(100000 * multiplier);
+      this.buckets[3].minUsdt = this.buckets[2].maxUsdt;
+    }
 
     console.log(
       `📊 BOOTSTRAP: Günlük Hacim $${(dailyQuoteVolume / 1000000).toFixed(1)}M | Çarpan: ${multiplier}x`
     );
 
     if (this.onThresholdUpdate) {
-      this.onThresholdUpdate(this.dynamicThresholds, this.mode);
+      this.onThresholdUpdate(this.getBuckets(), this.mode);
     }
   }
 
-  // Canlı Persentil Hesaplama (Her X işlemde bir veya belirli bir tetikleme ile)
+  // Dinamik Mod: Canlı Persentil Hesaplama
   recalculatePercentiles(): void {
     if (this.mode !== 'dynamic') return;
 
     const values = this.ringBuffer.getValues();
-    if (values.length < 50) return; // En az 50 işlem topla, saçma sapan hesaplama yapma
+    if (values.length < 50) return;
 
-    // Hızlı sıralama (Ascending)
     values.sort((a, b) => a - b);
-
     const len = values.length;
-    // P70, P90, P98 indislerini bul
-    const idx70 = Math.floor(len * 0.7);
-    const idx90 = Math.floor(len * 0.9);
-    const idx98 = Math.floor(len * 0.98);
 
-    this.dynamicThresholds.shrimpMax = Math.max(1, Math.round(values[idx70]));
-    this.dynamicThresholds.crabMax = Math.max(this.dynamicThresholds.shrimpMax + 1, Math.round(values[idx90]));
-    this.dynamicThresholds.whaleMax = Math.max(this.dynamicThresholds.crabMax + 1, Math.round(values[idx98]));
+    // Eğer standart 4 kova ise P70, P90, P98 hesapla
+    if (this.buckets.length === 4) {
+      const p70 = Math.max(1, Math.round(values[Math.floor(len * 0.7)]));
+      const p90 = Math.max(p70 + 1, Math.round(values[Math.floor(len * 0.9)]));
+      const p98 = Math.max(p90 + 1, Math.round(values[Math.floor(len * 0.98)]));
+
+      this.buckets[0].maxUsdt = p70;
+      this.buckets[1].minUsdt = p70;
+      this.buckets[1].maxUsdt = p90;
+      this.buckets[2].minUsdt = p90;
+      this.buckets[2].maxUsdt = p98;
+      this.buckets[3].minUsdt = p98;
+    } else if (this.buckets.length > 1) {
+      // Dinamik N kova varsa: Eşit aralıklı kuantiller
+      for (let i = 0; i < this.buckets.length - 1; i++) {
+        const pct = (i + 1) / this.buckets.length;
+        const qVal = Math.max(1, Math.round(values[Math.min(len - 1, Math.floor(len * pct))]));
+        this.buckets[i].maxUsdt = qVal;
+        this.buckets[i + 1].minUsdt = qVal;
+      }
+    }
 
     if (this.onThresholdUpdate) {
-      this.onThresholdUpdate(this.dynamicThresholds, this.mode);
+      this.onThresholdUpdate(this.getBuckets(), this.mode);
     }
   }
 
-  // Gelen işlemi sınıflandır ve istatistiği güncelle
-  processTrade(price: number, quantity: number, isBuyerMaker: boolean, tradeTime: number = Date.now()): { bucket: BucketKey; notionalValue: number } {
-    const notionalValue = price * quantity; // USDT cinsinden değer
+  // İşlem Sınıflandırma (Dinamik Aralık Taraması)
+  processTrade(
+    price: number,
+    quantity: number,
+    isBuyerMaker: boolean,
+    tradeTime: number = Date.now()
+  ): { bucketId: string; bucketName: string; bucketIcon: string; notionalValue: number } {
+    const notionalValue = price * quantity;
 
-    // 1. Ring Buffer'a ekle (Sadece dinamik modda)
     if (this.mode === 'dynamic') {
       this.ringBuffer.push(notionalValue);
-      // Her 50 işlemde bir persentilleri güncelle (Performans optimizasyonu)
       if (this.ringBuffer.count % 50 === 0) {
         this.recalculatePercentiles();
       }
     }
 
-    // 2. Hangi kovaya düştüğünü belirle
-    const thresholds = this.mode === 'dynamic' ? this.dynamicThresholds : this.staticThresholds;
-    let bucket: BucketKey = 'shrimp';
-
-    if (notionalValue > thresholds.whaleMax) bucket = 'leviathan';
-    else if (notionalValue > thresholds.crabMax) bucket = 'whale';
-    else if (notionalValue > thresholds.shrimpMax) bucket = 'crab';
-
-    // 3. İstatistiği işle (isBuyerMaker: true ise SATICI baskısı, false ise ALICI baskısı)
-    // NOT: Binance'te isBuyerMaker=true, işlemin limit defterindeki bir ALICI emri tarafından eşleştiği (yani agresif SATICI) anlamına gelir.
-    if (isBuyerMaker) {
-      this.stats[bucket].sellVol += notionalValue;
-    } else {
-      this.stats[bucket].buyVol += notionalValue;
+    // Doğru kovayı bul
+    let matchedBucket: BucketConfig = this.buckets[0];
+    for (let i = 0; i < this.buckets.length; i++) {
+      const b = this.buckets[i];
+      if (notionalValue >= b.minUsdt && (notionalValue < b.maxUsdt || i === this.buckets.length - 1)) {
+        matchedBucket = b;
+        break;
+      }
     }
-    this.stats[bucket].count += 1;
 
-    // 4. 1-Dakikalık Kayan Pencereye ekle
+    // İstatistiği güncelle
+    let curStat = this.stats.get(matchedBucket.id);
+    if (!curStat) {
+      curStat = { buyVol: 0, sellVol: 0, count: 0 };
+      this.stats.set(matchedBucket.id, curStat);
+    }
+
+    if (isBuyerMaker) {
+      curStat.sellVol += notionalValue;
+    } else {
+      curStat.buyVol += notionalValue;
+    }
+    curStat.count += 1;
+
+    // 1-dakikalık kayan pencereye ekle
     this.rollingTrades.push({
       time: tradeTime,
       notional: notionalValue,
       isBuyerMaker,
-      bucket,
+      bucketId: matchedBucket.id,
     });
 
-    // Her saniye ya da 50 işlemde bir 60s üzeri eski trade'leri temizle (O(1) amortized)
     if (tradeTime - this.lastPruneTime > 1000) {
       this.pruneRollingTrades(tradeTime);
       this.lastPruneTime = tradeTime;
     }
 
-    return { bucket, notionalValue };
+    return {
+      bucketId: matchedBucket.id,
+      bucketName: matchedBucket.name,
+      bucketIcon: matchedBucket.icon,
+      notionalValue,
+    };
   }
 
   pruneRollingTrades(currentTime: number): void {
     const cutoff = currentTime - 60_000;
-    // Fast binary-style search or slice
     let dropCount = 0;
     for (let i = 0; i < this.rollingTrades.length; i++) {
       if (this.rollingTrades[i].time < cutoff) {
@@ -211,8 +334,8 @@ export class BucketManager {
     }
   }
 
-  // 1 Dakikalık penceredeki istatistikleri ve Yön/Agresyon bias'ını hesapla
-  getRollingStats(bucketKey: BucketKey): {
+  // 1 Dakikalık penceredeki istatistikler
+  getRollingStats(bucketId: string): {
     rolling1mBuyVol: number;
     rolling1mSellVol: number;
     rolling1mDelta: number;
@@ -226,7 +349,7 @@ export class BucketManager {
 
     for (let i = 0; i < this.rollingTrades.length; i++) {
       const t = this.rollingTrades[i];
-      if (t.bucket === bucketKey) {
+      if (t.bucketId === bucketId) {
         count++;
         if (t.isBuyerMaker) {
           sellVol += t.notional;
@@ -238,7 +361,6 @@ export class BucketManager {
 
     const totalVol = buyVol + sellVol;
     const directionalBias = totalVol === 0 ? 50 : Math.round((buyVol / totalVol) * 100);
-    const aggressionScore = directionalBias; // Market taker alıcı baskısı %
 
     return {
       rolling1mBuyVol: Math.round(buyVol),
@@ -246,46 +368,73 @@ export class BucketManager {
       rolling1mDelta: Math.round(buyVol - sellVol),
       rolling1mCount: count,
       directionalBias,
-      aggressionScore,
+      aggressionScore: directionalBias,
     };
   }
 
-  getAllRollingStats(): Record<BucketKey, BucketStats> {
-    const buckets: BucketKey[] = ['shrimp', 'crab', 'whale', 'leviathan'];
-    const result = {} as Record<BucketKey, BucketStats>;
+  // Akıllı Sıralamalı Tüm Kova İstatistikleri (Smart Sorting)
+  getAllRollingStats(sortBy: SortOption = 'activity'): BucketStats[] {
+    const list: BucketStats[] = [];
 
-    for (const b of buckets) {
-      const rolling = this.getRollingStats(b);
-      result[b] = {
-        buyVol: this.stats[b].buyVol,
-        sellVol: this.stats[b].sellVol,
-        count: this.stats[b].count,
-        ...rolling,
-      };
+    for (const b of this.buckets) {
+      const s = this.stats.get(b.id) || { buyVol: 0, sellVol: 0, count: 0 };
+      const rolling = this.getRollingStats(b.id);
+
+      list.push({
+        id: b.id,
+        name: b.name,
+        buyVol: s.buyVol,
+        sellVol: s.sellVol,
+        count: s.count,
+        rolling1mBuyVol: rolling.rolling1mBuyVol,
+        rolling1mSellVol: rolling.rolling1mSellVol,
+        rolling1mDelta: rolling.rolling1mDelta,
+        rolling1mCount: rolling.rolling1mCount,
+        directionalBias: rolling.directionalBias,
+        aggressionScore: rolling.aggressionScore,
+        config: b,
+      });
     }
-    return result;
+
+    // Akıllı Sıralama Mantığı
+    switch (sortBy) {
+      case 'activity': // En çok işlem görenler (Canlı aktivite)
+        list.sort((a, b) => b.rolling1mCount - a.rolling1mCount || b.count - a.count);
+        break;
+      case 'delta_desc': // En yüksek pozitif alıcı deltası
+        list.sort((a, b) => b.rolling1mDelta - a.rolling1mDelta);
+        break;
+      case 'delta_asc': // En yüksek negatif satıcı deltası (Satış baskısı)
+        list.sort((a, b) => a.rolling1mDelta - b.rolling1mDelta);
+        break;
+      case 'volume': // 1m Hacim toplamı
+        list.sort((a, b) => (b.rolling1mBuyVol + b.rolling1mSellVol) - (a.rolling1mBuyVol + a.rolling1mSellVol));
+        break;
+      case 'hierarchy': // Küçükten büyüğe USDT sırası
+      default:
+        list.sort((a, b) => a.config.minUsdt - b.config.minUsdt);
+        break;
+    }
+
+    return list;
   }
 
-  // Akıllı Para (Balina + Leviathan) vs Aptal Para (Karides) Uyumsuzluğu
-  getSmartMoneyDivergence(): {
-    retailDelta1m: number;
-    smartDelta1m: number;
-    signal: 'ACCUMULATION' | 'DISTRIBUTION' | 'BULL_MOMENTUM' | 'BEAR_MOMENTUM' | 'NEUTRAL';
-    signalTitle: string;
-    signalDesc: string;
-    confidence: number;
-  } {
-    const shrimpRolling = this.getRollingStats('shrimp');
-    const whaleRolling = this.getRollingStats('whale');
-    const leviRolling = this.getRollingStats('leviathan');
+  // Akıllı Para vs Aptal Para Uyumsuzluk Radarı (Divergence)
+  getSmartMoneyDivergence(): SmartMoneyDivergence {
+    let retailDelta1m = 0;
+    let smartDelta1m = 0;
 
-    const retailDelta1m = shrimpRolling.rolling1mDelta;
-    const smartDelta1m = whaleRolling.rolling1mDelta + leviRolling.rolling1mDelta;
+    for (const b of this.buckets) {
+      const rolling = this.getRollingStats(b.id);
+      if (b.isSmartMoney || b.minUsdt >= 10000) {
+        smartDelta1m += rolling.rolling1mDelta;
+      } else {
+        retailDelta1m += rolling.rolling1mDelta;
+      }
+    }
 
-    // Uyuşmazlık analizi:
-    // 1. Bullish Absorption (Boğa Emilimi): Retail satıyor (korku), Balina topluyor (akıllı para)
     if (retailDelta1m < -500 && smartDelta1m > 1000) {
-      const conf = Math.min(99, Math.round(65 + Math.abs(smartDelta1m) / 10000 * 20));
+      const conf = Math.min(99, Math.round(65 + (Math.abs(smartDelta1m) / 10000) * 20));
       return {
         retailDelta1m,
         smartDelta1m,
@@ -296,9 +445,8 @@ export class BucketManager {
       };
     }
 
-    // 2. Bearish Distribution (Mal Boşaltma / Boğa Tuzağı): Retail FOMO alıyor, Balina basıyor
     if (retailDelta1m > 500 && smartDelta1m < -1000) {
-      const conf = Math.min(99, Math.round(65 + Math.abs(smartDelta1m) / 10000 * 20));
+      const conf = Math.min(99, Math.round(65 + (Math.abs(smartDelta1m) / 10000) * 20));
       return {
         retailDelta1m,
         smartDelta1m,
@@ -309,7 +457,6 @@ export class BucketManager {
       };
     }
 
-    // 3. Güçlü Konsensüs Boğa (Bull Momentum)
     if (smartDelta1m > 2000 && retailDelta1m > 0) {
       return {
         retailDelta1m,
@@ -321,7 +468,6 @@ export class BucketManager {
       };
     }
 
-    // 4. Güçlü Konsensüs Ayı (Bear Momentum)
     if (smartDelta1m < -2000 && retailDelta1m < 0) {
       return {
         retailDelta1m,
@@ -342,24 +488,12 @@ export class BucketManager {
       confidence: 50,
     };
   }
-
-  // Belirli bir kovanın Yön Bias'ını hesapla (0-100)
-  // 50: Nötr, >50: Long Bias (Alıcı baskın), <50: Short Bias (Satıcı baskın)
-  getDirectionalBias(bucketName: BucketKey): number {
-    const s = this.stats[bucketName];
-    const totalVol = s.buyVol + s.sellVol;
-    if (totalVol === 0) return 50;
-
-    const buyRatio = (s.buyVol / totalVol) * 100;
-    return Math.round(buyRatio);
-  }
 }
 
 // 3. WEBSOCKET YÖNETİCİSİ
 export class WSManager {
   bucketManager: BucketManager;
   ws: WebSocket | null = null;
-  tickerWs: WebSocket | null = null;
   currentSymbol: string = '';
   onTrade?: (trade: RecentTrade) => void;
   onStatusChange?: (status: 'disconnected' | 'connecting' | 'connected' | 'error', message: string) => void;
@@ -372,17 +506,15 @@ export class WSManager {
 
   connect(symbol: string): void {
     this.currentSymbol = symbol.toLowerCase().trim();
-    this.bucketManager.resetStats(); // Yeni coin, temiz sayfa
+    this.bucketManager.resetStats();
 
     if (this.onStatusChange) {
       this.onStatusChange('connecting', `Bağlanıyor: ${symbol.toUpperCase()}...`);
     }
     this.log(`🚀 BAŞLATILIYOR: ${symbol.toUpperCase()} stream ve bootstrap`, 'info');
 
-    // Önce 24s hacmi çekmek için REST API çağrısı
     this.fetchBootstrapVolume();
 
-    // Ana Trade Stream'i aç
     const tradeUrl = `wss://fstream.binance.com/ws/${this.currentSymbol}@trade`;
     try {
       this.ws = new WebSocket(tradeUrl);
@@ -397,7 +529,7 @@ export class WSManager {
     this.ws.onopen = () => {
       console.log(`✅ WS BAĞLANDI: ${symbol.toUpperCase()}`);
       this.log(`✅ WS BAĞLANDI: ${symbol.toUpperCase()} Binance Futures stream canlı!`, 'success');
-      
+
       const statusElem = document.getElementById('ws-status');
       if (statusElem) {
         statusElem.innerText = `Status: Bağlı (${symbol.toUpperCase()})`;
@@ -418,10 +550,13 @@ export class WSManager {
         const tradeTime = data.T || Date.now();
         const tradeId = data.t || Date.now();
 
-        // Çekirdek motoru besle
-        const { bucket, notionalValue } = this.bucketManager.processTrade(price, qty, isBuyerMaker, tradeTime);
+        const { bucketId, bucketName, bucketIcon, notionalValue } = this.bucketManager.processTrade(
+          price,
+          qty,
+          isBuyerMaker,
+          tradeTime
+        );
 
-        // UI Güncelleme Tetikleyicisi
         this.updateUI(price);
 
         if (this.onTrade) {
@@ -432,7 +567,9 @@ export class WSManager {
             notional: notionalValue,
             isBuyerMaker,
             time: tradeTime,
-            bucket,
+            bucketId,
+            bucketName,
+            bucketIcon,
           });
         }
       } catch (err: any) {
@@ -443,7 +580,7 @@ export class WSManager {
     this.ws.onerror = (err: Event) => {
       console.error('❌ WS HATA:', err);
       this.log(`❌ WS HATA: ${symbol.toUpperCase()} akışında kopma oldu!`, 'error');
-      
+
       const statusElem = document.getElementById('ws-status');
       if (statusElem) {
         statusElem.innerText = 'Status: Bağlantı Hatası!';
@@ -504,14 +641,6 @@ export class WSManager {
         // ignore
       }
       this.ws = null;
-    }
-    if (this.tickerWs) {
-      try {
-        this.tickerWs.close();
-      } catch (e) {
-        // ignore
-      }
-      this.tickerWs = null;
     }
     if (this.onStatusChange) {
       this.onStatusChange('disconnected', 'Bağlantı Kesildi');
