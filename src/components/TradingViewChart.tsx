@@ -51,10 +51,13 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   });
 
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
+  const [priceDirection, setPriceDirection] = useState<'up' | 'down' | 'neutral'>('neutral');
   const [priceChange24h, setPriceChange24h] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [candleCount, setCandleCount] = useState<number>(0);
   const [isTickPulsing, setIsTickPulsing] = useState<boolean>(false);
+  const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [tickCount, setTickCount] = useState<number>(0);
 
   // Aktif son mumu hafızada tutuyoruz (tic tic güncellemesi için)
   const currentBarRef = useRef<{
@@ -66,6 +69,10 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     volume: number;
   } | null>(null);
 
+  const prevPriceRef = useRef<number | null>(null);
+  const pulseTimeoutRef = useRef<any>(null);
+  const chartWsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
   const saveTimeoutRef = useRef<any>(null);
 
   const timeframeSecondsMap: Record<ChartTimeframe, number> = {
@@ -298,6 +305,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         const last = raw[raw.length - 1];
         const lastTime = Math.floor(last[0] / 1000);
         const lastClose = parseFloat(last[4]);
+
+        // Fiyat hassasiyetini sembole göre dinamik ayarla (BTC için 2, küçük altcoinler için 4-6)
+        const precision = lastClose >= 1000 ? 2 : lastClose >= 1 ? 4 : 6;
+        const minMove = 1 / Math.pow(10, precision);
+        candleSeriesRef.current.applyOptions({
+          priceFormat: {
+            type: 'price',
+            precision,
+            minMove,
+          },
+        });
+
         currentBarRef.current = {
           time: lastTime,
           open: parseFloat(last[1]),
@@ -306,6 +325,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           close: lastClose,
           volume: parseFloat(last[5]),
         };
+        prevPriceRef.current = lastClose;
         setCurrentPrice(lastClose);
         setCandleCount(candleData.length);
       }
@@ -334,132 +354,208 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       .catch(() => {});
   }, [symbol]);
 
-  // 4. CANLI TİC TİC GÜNCELLEME (Trade ve Kline Stream Dinleyicisi)
+  // 4. CANLI DOĞRUDAN @TRADE VE @KLINE DEDİKE WEBSOCKET AKIŞI (Sıfır Gecikme, Anlık Tic Tic)
   useEffect(() => {
+    const cleanSym = symbol.toLowerCase().trim();
+    if (!cleanSym) return;
+
+    let isDisposed = false;
     const tfSec = timeframeSecondsMap[timeframe];
 
-    // Gelen her işlemde anlık barı güncelle (Saf Canlı Tic Tic)
-    const originalOnTrade = wsManager.onTrade;
-    wsManager.onTrade = (trade) => {
-      if (originalOnTrade) originalOnTrade(trade);
+    // Eski bağlantıyı kapat
+    if (chartWsRef.current) {
+      try {
+        chartWsRef.current.onclose = null;
+        chartWsRef.current.onerror = null;
+        chartWsRef.current.close();
+      } catch {}
+      chartWsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
 
-      const price = trade.price;
-      const qty = trade.qty;
-      if (!price || isNaN(price) || price <= 0 || !isFinite(price)) return;
-      if (qty === undefined || isNaN(qty) || qty < 0) return;
+    const connectChartStream = () => {
+      if (isDisposed) return;
 
-      const current = currentBarRef.current;
-      // Anormal fiyat zıplaması koruması (bad tick / volume / outlier filtresi)
-      if (current && current.close > 0) {
-        if (price < current.close * 0.5 || price > current.close * 1.8) {
-          return;
-        }
-      }
+      // Binance Futures: Hem her tekil işlem için @trade hem de resmi mum kontrolü için @kline
+      const streamUrl = `wss://fstream.binance.com/stream?streams=${cleanSym}@trade/${cleanSym}@kline_${timeframe}`;
+      
+      try {
+        const ws = new WebSocket(streamUrl);
+        chartWsRef.current = ws;
 
-      const tradeTimeSec = Math.floor(trade.time / 1000);
-      const barTimeSec = Math.floor(tradeTimeSec / tfSec) * tfSec;
-
-      setCurrentPrice(price);
-      setIsTickPulsing(true);
-      setTimeout(() => setIsTickPulsing(false), 80);
-
-      if (!current || barTimeSec > current.time) {
-        // Yeni mum başlangıcı
-        const newBar = {
-          time: barTimeSec,
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-          volume: qty,
+        ws.onopen = () => {
+          if (isDisposed) return;
+          setWsConnected(true);
         };
-        currentBarRef.current = newBar;
-        candleSeriesRef.current?.update({
-          time: barTimeSec as Time,
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-        });
-        volumeSeriesRef.current?.update({
-          time: barTimeSec as Time,
-          value: qty,
-          color: 'rgba(16, 185, 129, 0.4)',
-        });
-      } else if (barTimeSec === current.time) {
-        // Mevcut mumu tic tic güncelle
-        current.high = Math.max(current.high, price);
-        current.low = Math.min(current.low, price);
-        current.close = price;
-        current.volume += qty;
 
-        candleSeriesRef.current?.update({
-          time: current.time as Time,
-          open: current.open,
-          high: current.high,
-          low: current.low,
-          close: current.close,
-        });
-        volumeSeriesRef.current?.update({
-          time: current.time as Time,
-          value: current.volume,
-          color: current.close >= current.open ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)',
-        });
+        ws.onmessage = (event: MessageEvent) => {
+          if (isDisposed) return;
+          try {
+            const raw = JSON.parse(event.data);
+            const data = raw.data || raw;
+
+            // A) @TRADE AKIŞI: MİLİSANİYE SEVİYESİNDE HER İŞLEMDE ANLIK FİYAT VE MUM HAREKETİ
+            const isTrade = data.e === 'trade' || (typeof raw.stream === 'string' && raw.stream.endsWith('@trade'));
+            if (isTrade && data.p && data.q) {
+              const price = parseFloat(data.p);
+              const qty = parseFloat(data.q);
+              if (isNaN(price) || price <= 0 || isNaN(qty) || qty < 0) return;
+
+              const current = currentBarRef.current;
+              // Anormal glitch filtresi
+              if (current && current.close > 0) {
+                if (price < current.close * 0.5 || price > current.close * 1.8) {
+                  return;
+                }
+              }
+
+              // Fiyat hareket yönü tespiti (Dopamin Yeşil / Kırmızı Yanıp Sönme)
+              const prev = prevPriceRef.current;
+              if (prev !== null && prev !== price) {
+                setPriceDirection(price > prev ? 'up' : 'down');
+              }
+              prevPriceRef.current = price;
+
+              // Anlık canlı fiyatı state'e bas
+              setCurrentPrice(price);
+              setTickCount((prevCount) => prevCount + 1);
+              setIsTickPulsing(true);
+              if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+              pulseTimeoutRef.current = setTimeout(() => setIsTickPulsing(false), 90);
+
+              // Mum güncellemesi
+              const tradeTimeMs = data.T || Date.now();
+              const tradeTimeSec = Math.floor(tradeTimeMs / 1000);
+              const barTimeSec = Math.floor(tradeTimeSec / tfSec) * tfSec;
+
+              if (!current || barTimeSec > current.time) {
+                // Yeni mum başlangıcı
+                const newBar = {
+                  time: barTimeSec,
+                  open: price,
+                  high: price,
+                  low: price,
+                  close: price,
+                  volume: qty,
+                };
+                currentBarRef.current = newBar;
+                candleSeriesRef.current?.update({
+                  time: barTimeSec as Time,
+                  open: price,
+                  high: price,
+                  low: price,
+                  close: price,
+                });
+                volumeSeriesRef.current?.update({
+                  time: barTimeSec as Time,
+                  value: qty,
+                  color: 'rgba(16, 185, 129, 0.4)',
+                });
+              } else if (barTimeSec === current.time || (barTimeSec < current.time && current.time - barTimeSec <= tfSec)) {
+                // Mevcut mumu anlık tic tic güncelle
+                current.high = Math.max(current.high, price);
+                current.low = Math.min(current.low, price);
+                current.close = price;
+                current.volume += qty;
+
+                candleSeriesRef.current?.update({
+                  time: current.time as Time,
+                  open: current.open,
+                  high: current.high,
+                  low: current.low,
+                  close: current.close,
+                });
+                volumeSeriesRef.current?.update({
+                  time: current.time as Time,
+                  value: current.volume,
+                  color: current.close >= current.open ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)',
+                });
+              }
+            }
+
+            // B) @KLINE AKIŞI: RESMİ BİNANCE MUM VERİSİ İLE SENKRONİZASYON
+            const isKline = data.e === 'kline' || (typeof raw.stream === 'string' && raw.stream.includes('@kline'));
+            if (isKline && data.k) {
+              const k = data.k;
+              const kTimeSec = Math.floor(k.t / 1000);
+              const kOpen = parseFloat(k.o);
+              const kHigh = parseFloat(k.h);
+              const kLow = parseFloat(k.l);
+              const kClose = parseFloat(k.c);
+              const kVol = parseFloat(k.v);
+
+              if (currentBarRef.current && kTimeSec === currentBarRef.current.time) {
+                currentBarRef.current.open = kOpen;
+                currentBarRef.current.high = Math.max(currentBarRef.current.high, kHigh);
+                currentBarRef.current.low = Math.min(currentBarRef.current.low, kLow);
+                currentBarRef.current.close = kClose;
+                currentBarRef.current.volume = kVol;
+              } else if (!currentBarRef.current || kTimeSec > currentBarRef.current.time) {
+                currentBarRef.current = {
+                  time: kTimeSec,
+                  open: kOpen,
+                  high: kHigh,
+                  low: kLow,
+                  close: kClose,
+                  volume: kVol,
+                };
+              }
+
+              candleSeriesRef.current?.update({
+                time: kTimeSec as Time,
+                open: currentBarRef.current?.open ?? kOpen,
+                high: currentBarRef.current?.high ?? kHigh,
+                low: currentBarRef.current?.low ?? kLow,
+                close: kClose,
+              });
+              volumeSeriesRef.current?.update({
+                time: kTimeSec as Time,
+                value: kVol,
+                color: kClose >= kOpen ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)',
+              });
+            }
+          } catch (err) {
+            console.error('Doğrudan grafik WS parse hatası:', err);
+          }
+        };
+
+        ws.onerror = () => {
+          setWsConnected(false);
+        };
+
+        ws.onclose = () => {
+          setWsConnected(false);
+          if (!isDisposed) {
+            reconnectTimeoutRef.current = setTimeout(connectChartStream, 1500);
+          }
+        };
+      } catch (err) {
+        console.error('Chart WS bağlantı hatası:', err);
+        if (!isDisposed) {
+          reconnectTimeoutRef.current = setTimeout(connectChartStream, 2000);
+        }
       }
     };
 
-    // Market soketinden resmi kline geldiğinde senkronize et
-    const originalOnKline = wsManager.onKline;
-    wsManager.onKline = (kline) => {
-      if (originalOnKline) originalOnKline(kline);
-
-      if (timeframe === '1m') {
-        if (!kline.open || !kline.high || !kline.low || !kline.close) return;
-        if (isNaN(kline.low) || kline.low <= 0) return;
-        if (currentBarRef.current && currentBarRef.current.close > 0) {
-          if (kline.low < currentBarRef.current.close * 0.5) return;
-        }
-
-        const timeSec = kline.time;
-        const current = currentBarRef.current;
-        if (current && timeSec === current.time) {
-          current.open = kline.open;
-          current.high = Math.max(current.high, kline.high);
-          current.low = Math.min(current.low, kline.low);
-          current.close = kline.close;
-          current.volume = kline.volume;
-        } else if (!current || timeSec > current.time) {
-          currentBarRef.current = {
-            time: timeSec,
-            open: kline.open,
-            high: kline.high,
-            low: kline.low,
-            close: kline.close,
-            volume: kline.volume,
-          };
-        }
-
-        candleSeriesRef.current?.update({
-          time: timeSec as Time,
-          open: kline.open,
-          high: kline.high,
-          low: kline.low,
-          close: kline.close,
-        });
-        volumeSeriesRef.current?.update({
-          time: timeSec as Time,
-          value: kline.volume,
-          color: kline.close >= kline.open ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)',
-        });
-        setCurrentPrice(kline.close);
-      }
-    };
+    connectChartStream();
 
     return () => {
-      wsManager.onTrade = originalOnTrade;
-      wsManager.onKline = originalOnKline;
+      isDisposed = true;
+      if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (chartWsRef.current) {
+        try {
+          chartWsRef.current.onclose = null;
+          chartWsRef.current.onerror = null;
+          chartWsRef.current.close();
+        } catch {}
+        chartWsRef.current = null;
+      }
     };
-  }, [timeframe, wsManager]);
+  }, [symbol, timeframe, wsManager]);
 
   const handleZoomIn = () => {
     if (!chartRef.current) return;
@@ -535,16 +631,23 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           </span>
 
           <span
-            className={`text-xs font-mono font-black transition-colors ${
+            className={`text-xs sm:text-sm font-mono font-black px-1.5 py-0.5 rounded transition-all duration-75 ${
               isTickPulsing
-                ? 'text-emerald-300 scale-105'
-                : currentPrice !== null
+                ? priceDirection === 'up'
+                  ? 'bg-emerald-500/30 text-emerald-300 scale-105 shadow-[0_0_12px_rgba(16,185,129,0.5)]'
+                  : 'bg-rose-500/30 text-rose-300 scale-105 shadow-[0_0_12px_rgba(244,63,94,0.5)]'
+                : priceDirection === 'up'
                 ? 'text-emerald-400'
-                : 'text-stone-400'
+                : priceDirection === 'down'
+                ? 'text-rose-400'
+                : 'text-stone-200'
             }`}
           >
             {currentPrice !== null
-              ? `$${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+              ? `$${currentPrice.toLocaleString(undefined, {
+                  minimumFractionDigits: currentPrice >= 1000 ? 2 : 4,
+                  maximumFractionDigits: currentPrice >= 1000 ? 2 : 4,
+                })}`
               : 'Yükleniyor...'}
           </span>
 
@@ -555,6 +658,22 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           >
             {priceChange24h >= 0 ? '+' : ''}{priceChange24h.toFixed(2)}%
           </span>
+
+          {/* @trade Canlı Akış Göstergesi */}
+          <div className="flex items-center gap-1.5 bg-black/50 border border-stone-800 px-1.5 py-0.5 rounded-lg">
+            <span className="relative flex h-2 w-2">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${wsConnected ? 'bg-emerald-400' : 'bg-rose-500'}`}></span>
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${wsConnected ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
+            </span>
+            <span className="text-[10px] font-mono font-bold text-emerald-400">
+              @trade
+            </span>
+            {tickCount > 0 && (
+              <span className="text-[9px] font-mono text-stone-400 hidden lg:inline">
+                {tickCount}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="h-4 w-[1px] bg-stone-700/60" />

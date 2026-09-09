@@ -204,11 +204,21 @@ export default function App() {
       const sorted = bm.getAllBucketsSorted(sortOption, appSettings.activeTimeframe, now);
       setSortedBuckets(sorted);
 
-      // İşlem akışını güvenli ve eşzamanlı aktar
+      // İşlem akışını güvenli ve eşzamanlı aktar (Deduplication ile key collision engellenir)
       if (tradeBatchRef.current.length > 0) {
         const incoming = [...tradeBatchRef.current].reverse();
         tradeBatchRef.current = [];
-        setRecentTrades((prev) => [...incoming, ...prev].slice(0, 100));
+        setRecentTrades((prev) => {
+          const seen = new Set<string | number>();
+          const deduped: typeof prev = [];
+          for (const item of [...incoming, ...prev]) {
+            if (!seen.has(item.id)) {
+              seen.add(item.id);
+              deduped.push(item);
+            }
+          }
+          return deduped.slice(0, 100);
+        });
       }
     }, 120);
 

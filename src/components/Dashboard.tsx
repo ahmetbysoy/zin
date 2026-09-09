@@ -268,12 +268,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   </td>
                 </tr>
               ) : (
-                recentTrades.slice(0, maxTradesShown).map((t) => {
+                recentTrades.slice(0, maxTradesShown).map((t, idx) => {
                   const isWhale = t.notional >= 50000;
                   const isLeviathan = t.notional >= 250000;
                   return (
                     <tr 
-                      key={t.id} 
+                      key={`${t.id}_${t.time}_${idx}`} 
                       className={`transition-colors ${
                         isLeviathan 
                           ? 'bg-amber-100/50 dark:bg-amber-950/40 border-l-2 border-amber-500 font-bold' 
