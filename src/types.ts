@@ -1,28 +1,22 @@
-export interface BucketConfig {
-  id: string;
-  name: string;
-  minUsdt: number;
-  maxUsdt: number;
-  color: string;
-  bgColor: string;
-  borderColor: string;
-  icon: string;
-  isSmartMoney?: boolean;
-}
+export type BucketKey = 'shrimp' | 'crab' | 'whale' | 'leviathan';
+export type AllBucketTypes = BucketKey | string;
 
-export interface BucketStats {
+export type TimeframeOption = '1m' | '5m' | '15m';
+export type ActiveTab = 'dashboard' | 'wallets' | 'stats' | 'logs' | 'settings';
+export type SortOption = 'activity' | 'delta_desc' | 'delta_asc' | 'volume' | 'hierarchy';
+export type ThemeMode = 'dark' | 'light';
+
+export interface CustomBucket {
   id: string;
   name: string;
-  buyVol: number;
-  sellVol: number;
-  count: number;
-  rolling1mBuyVol: number;
-  rolling1mSellVol: number;
-  rolling1mCount: number;
-  rolling1mDelta: number;
-  directionalBias: number; // 0-100
-  aggressionScore: number; // 0-100
-  config: BucketConfig;
+  minValue: number;
+  maxValue: number;
+  color: string;
+  icon: string;
+  isActive: boolean;
+  tradeCount: number;
+  volume: number;
+  isSmartMoney?: boolean;
 }
 
 export interface BucketThresholds {
@@ -31,20 +25,38 @@ export interface BucketThresholds {
   whaleMax: number;
 }
 
+export interface BucketStats {
+  id: string;
+  name: string;
+  icon: string;
+  buyVol: number;
+  sellVol: number;
+  count: number;
+  rollingBuyVol?: number;
+  rollingSellVol?: number;
+  rollingCount?: number;
+  rollingDelta?: number;
+  directionalBias?: number;
+  aggressionScore?: number;
+  minValue?: number;
+  maxValue?: number;
+  color?: string;
+  isSmartMoney?: boolean;
+}
+
+export interface EngineStatsState {
+  shrimp: BucketStats;
+  crab: BucketStats;
+  whale: BucketStats;
+  leviathan: BucketStats;
+  [key: string]: BucketStats;
+}
+
 export interface TimedTradeItem {
   time: number;
   notional: number;
   isBuyerMaker: boolean;
-  bucketId: string;
-}
-
-export interface SmartMoneyDivergence {
-  retailDelta1m: number;
-  smartDelta1m: number;
-  signal: 'ACCUMULATION' | 'DISTRIBUTION' | 'BULL_MOMENTUM' | 'BEAR_MOMENTUM' | 'NEUTRAL';
-  signalTitle: string;
-  signalDesc: string;
-  confidence: number;
+  bucket: AllBucketTypes;
 }
 
 export interface RecentTrade {
@@ -54,10 +66,35 @@ export interface RecentTrade {
   notional: number;
   isBuyerMaker: boolean;
   time: number;
-  bucketId: string;
+  bucket: AllBucketTypes;
   bucketName: string;
   bucketIcon: string;
 }
 
-export type ActiveTab = 'analysis' | 'wallets' | 'settings';
-export type SortOption = 'activity' | 'delta_desc' | 'delta_asc' | 'volume' | 'hierarchy';
+export interface SmartMoneyDivergence {
+  timeframe: TimeframeOption;
+  retailDelta: number;
+  smartDelta: number;
+  signal: 'ACCUMULATION' | 'DISTRIBUTION' | 'BULL_MOMENTUM' | 'BEAR_MOMENTUM' | 'NEUTRAL';
+  signalTitle: string;
+  signalDesc: string;
+  confidence: number;
+  timestamp: number;
+}
+
+export interface AppSettings {
+  theme: ThemeMode;
+  soundEnabled: boolean;
+  activeTimeframe: TimeframeOption;
+  bufferSize: number;
+  maxRecentTrades: number;
+  autoReconnect: boolean;
+}
+
+export interface TerminalLog {
+  id: number;
+  text: string;
+  type: 'info' | 'warn' | 'success' | 'error';
+  time: string;
+  timestamp: number;
+}
