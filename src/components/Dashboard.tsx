@@ -27,6 +27,13 @@ interface DashboardProps {
   onNavigateToWallets: () => void;
 }
 
+const formatPrice = (price: number): string => {
+  if (price >= 1000) return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (price >= 1) return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+  if (price >= 0.01) return `$${price.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 })}`;
+  return `$${price.toFixed(8)}`;
+};
+
 export const Dashboard: React.FC<DashboardProps> = ({
   divergence,
   topBuckets,
@@ -98,8 +105,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
               ))}
             </div>
 
-            {/* Delta Badges */}
-            <div className="flex items-center gap-2 font-mono text-xs">
+            {/* Delta & OBI Badges */}
+            <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
               <div className="px-3 py-1.5 bg-white/90 dark:bg-stone-800 rounded-xl border border-stone-200 dark:border-stone-700 shadow-2xs">
                 <span className="text-stone-400 dark:text-stone-500 text-[9px] block uppercase font-sans">RETAIL DELTA ({activeTimeframe})</span>
                 <span className={`font-bold ${divergence.retailDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
@@ -112,9 +119,46 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   {divergence.smartDelta >= 0 ? '+' : ''}${Math.round(divergence.smartDelta).toLocaleString()}
                 </span>
               </div>
+
+              {/* OBI DENGESİZLİK SKORU */}
+              {typeof divergence.overallObi === 'number' && (
+                <div className="px-3 py-1.5 bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 rounded-xl shadow-2xs">
+                  <span className="text-stone-400 dark:text-stone-500 text-[9px] block uppercase font-sans">OBI (IMBALANCE)</span>
+                  <span className={`font-bold text-sm ${
+                    divergence.overallObi > 10 ? 'text-emerald-400 dark:text-emerald-600' :
+                    divergence.overallObi < -10 ? 'text-rose-400 dark:text-rose-600' : 'text-stone-300 dark:text-stone-700'
+                  }`}>
+                    {divergence.overallObi > 0 ? '+' : ''}{divergence.overallObi}%
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>
+
+        {/* Canlı OBI İlerleme Çubuğu */}
+        {typeof divergence.overallObi === 'number' && (
+          <div className="mt-3 pt-2.5 border-t border-stone-200/60 dark:border-stone-800/80 flex items-center gap-3">
+            <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400 whitespace-nowrap">
+              Emir Akışı Dengesi (Alış vs Satış):
+            </span>
+            <div className="flex-1 h-2 bg-stone-200 dark:bg-stone-800 rounded-full overflow-hidden flex relative">
+              <div 
+                className="bg-emerald-500 h-full transition-all duration-300"
+                style={{ width: `${Math.max(5, Math.min(95, 50 + (divergence.overallObi / 2)))}%` }}
+                title={`Alıcı Ağırlığı: %${Math.round(50 + (divergence.overallObi / 2))}`}
+              />
+              <div 
+                className="bg-rose-500 h-full transition-all duration-300"
+                style={{ width: `${Math.max(5, Math.min(95, 50 - (divergence.overallObi / 2)))}%` }}
+                title={`Satıcı Ağırlığı: %${Math.round(50 - (divergence.overallObi / 2))}`}
+              />
+            </div>
+            <span className="text-[10px] font-mono font-black text-stone-700 dark:text-stone-300">
+              {divergence.overallObi > 0 ? '🟢 Alıcı Hakim' : divergence.overallObi < 0 ? '🔴 Satıcı Hakim' : '⚖️ Nötr'}
+            </span>
+          </div>
+        )}
       </section>
 
       {/* ==================================================================== */}
@@ -183,14 +227,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
       <section className="bg-white/95 dark:bg-stone-900 rounded-2xl p-4 sm:p-5 border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            </span>
             <Activity className="w-4 h-4 text-rose-500" />
             <h2 className="text-sm font-bold text-stone-900 dark:text-stone-100">
               Canlı İşlem Akışı ({activeSymbol || 'Binance Stream'})
             </h2>
           </div>
-          <span className="text-xs text-stone-400 dark:text-stone-500 font-mono">
-            Son {recentTrades.slice(0, maxTradesShown).length} İşlem
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+              Canlı Akış
+            </span>
+            <span className="text-xs text-stone-400 dark:text-stone-500 font-mono">
+              Son {recentTrades.slice(0, maxTradesShown).length} İşlem
+            </span>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
@@ -208,35 +261,56 @@ export const Dashboard: React.FC<DashboardProps> = ({
               {recentTrades.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-8 text-center text-stone-400 dark:text-stone-500 font-sans">
-                    Henüz işlem akışı yok. Yukarıdan <strong>"BAŞLAT"</strong> tuşuna bas!
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <div className="w-6 h-6 border-2 border-rose-500 border-t-transparent rounded-full animate-spin"></div>
+                      <p className="text-xs font-medium">Binance Futures gerçek emir akışına bağlanılıyor...</p>
+                    </div>
                   </td>
                 </tr>
               ) : (
-                recentTrades.slice(0, maxTradesShown).map((t) => (
-                  <tr key={t.id} className="hover:bg-rose-50/50 dark:hover:bg-stone-800/50 transition-colors">
-                    <td className="py-2 text-stone-500 dark:text-stone-400">{new Date(t.time).toLocaleTimeString()}</td>
-                    <td className={`py-2 font-semibold ${t.isBuyerMaker ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                      ${t.price.toLocaleString(undefined, { minimumFractionDigits: t.price < 1 ? 4 : 2 })}
-                    </td>
-                    <td className="py-2 font-bold text-stone-800 dark:text-stone-200">
-                      ${Math.round(t.notional).toLocaleString()}
-                    </td>
-                    <td className="py-2">
-                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                        t.isBuyerMaker 
-                          ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' 
-                          : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
-                      }`}>
-                        {t.isBuyerMaker ? 'SATICI MARKET' : 'ALICI MARKET'}
-                      </span>
-                    </td>
-                    <td className="py-2 text-right">
-                      <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-stone-800 dark:text-stone-200">
-                        {t.bucketIcon} {t.bucketName}
-                      </span>
-                    </td>
-                  </tr>
-                ))
+                recentTrades.slice(0, maxTradesShown).map((t) => {
+                  const isWhale = t.notional >= 50000;
+                  const isLeviathan = t.notional >= 250000;
+                  return (
+                    <tr 
+                      key={t.id} 
+                      className={`transition-colors ${
+                        isLeviathan 
+                          ? 'bg-amber-100/50 dark:bg-amber-950/40 border-l-2 border-amber-500 font-bold' 
+                          : isWhale
+                          ? 'bg-rose-50/60 dark:bg-stone-800/60 border-l-2 border-rose-500'
+                          : 'hover:bg-rose-50/50 dark:hover:bg-stone-800/50'
+                      }`}
+                    >
+                      <td className="py-2 text-stone-500 dark:text-stone-400">{new Date(t.time).toLocaleTimeString()}</td>
+                      <td className={`py-2 font-semibold ${t.isBuyerMaker ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                        {formatPrice(t.price)}
+                      </td>
+                      <td className="py-2 font-bold text-stone-800 dark:text-stone-200">
+                        ${Math.round(t.notional).toLocaleString()}
+                        {isLeviathan && <span className="ml-1 text-[10px] text-amber-600 dark:text-amber-400 font-black">🔥 BLOK</span>}
+                      </td>
+                      <td className="py-2">
+                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                          t.isBuyerMaker 
+                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' 
+                            : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                        }`}>
+                          {t.isBuyerMaker ? 'SATICI MARKET' : 'ALICI MARKET'}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right">
+                        <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${
+                          isLeviathan
+                            ? 'bg-amber-500 text-white border-amber-600 shadow-2xs'
+                            : 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-800 dark:text-stone-200'
+                        }`}>
+                          {t.bucketIcon} {t.bucketName}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

@@ -171,7 +171,10 @@ export default function App() {
       setCurrentPrice(trade.price);
     };
 
-    addLog('Terminal başlatıldı. Binance Futures verilerine hazır.', 'info');
+    addLog('Terminal başlatıldı. Binance Futures canlı verisine bağlanılıyor...', 'info');
+    // Sayfa açılır açılmaz otomatik canlı piyasa akışını başlat (0 işlem beklemesini yok et)
+    ws.connect('BTCUSDT');
+    setIsRunning(true);
   }, [addLog]);
 
   // Decoupled 120ms React UI Refresh Loop
@@ -200,13 +203,11 @@ export default function App() {
       const sorted = bm.getAllBucketsSorted(sortOption, appSettings.activeTimeframe, now);
       setSortedBuckets(sorted);
 
-      // İşlem akışını aktar
+      // İşlem akışını güvenli ve eşzamanlı aktar
       if (tradeBatchRef.current.length > 0) {
-        setRecentTrades((prev) => {
-          const combined = [...tradeBatchRef.current.reverse(), ...prev];
-          tradeBatchRef.current = [];
-          return combined.slice(0, 80);
-        });
+        const incoming = [...tradeBatchRef.current].reverse();
+        tradeBatchRef.current = [];
+        setRecentTrades((prev) => [...incoming, ...prev].slice(0, 100));
       }
     }, 120);
 
@@ -217,6 +218,13 @@ export default function App() {
   const handleStart = (symbolToStart?: string) => {
     const sym = (symbolToStart || symbolInput).trim().toUpperCase();
     if (!sym) return;
+
+    if (activeSymbol && activeSymbol !== sym) {
+      setRecentTrades([]);
+      tradeBatchRef.current = [];
+      setCurrentPrice(null);
+      prevPriceRef.current = null;
+    }
 
     setActiveSymbol(sym);
     setSymbolInput(sym);
@@ -263,7 +271,7 @@ export default function App() {
             {/* Price Badge on Mobile */}
             <div className="md:hidden">
               <div
-                id="price-val"
+                id="price-val-mobile"
                 className={`font-mono text-sm font-black px-2.5 py-1 rounded-xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 ${
                   priceDirection === 'up' ? 'text-emerald-600 dark:text-emerald-400' :
                   priceDirection === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-stone-700 dark:text-stone-300'
@@ -278,7 +286,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             {/* Real-time Price Badge on Desktop */}
             <div
-              id="price-val"
+              id="price-val-desktop"
               className={`hidden md:block font-mono text-base font-black px-3.5 py-1 rounded-xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 transition-colors ${
                 priceDirection === 'up' ? 'text-emerald-600 dark:text-emerald-400' :
                 priceDirection === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-stone-700 dark:text-stone-300'

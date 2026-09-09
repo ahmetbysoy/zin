@@ -75,6 +75,9 @@ export interface SmartMoneyDivergence {
   timeframe: TimeframeOption;
   retailDelta: number;
   smartDelta: number;
+  overallObi?: number;
+  smartObi?: number;
+  retailObi?: number;
   signal: 'ACCUMULATION' | 'DISTRIBUTION' | 'BULL_MOMENTUM' | 'BEAR_MOMENTUM' | 'NEUTRAL';
   signalTitle: string;
   signalDesc: string;

@@ -13,10 +13,10 @@ import {
 } from './types';
 
 // ========================================================================
-// 🧠 ZIN PROJESİ - QUANT MOTORU & RECONNECT STREAM KERNEL (FAZA 3+)
+// 🧠 ZIN PROJESİ - QUANT MOTORU & RECONNECT STREAM KERNEL (FAZA 3.5)
 // ========================================================================
 
-// 1. RING BUFFER - Dinamik Boyutlandırma ve Float64Array Bellek Koruması
+// 1. RING BUFFER - Dinamik Boyutlandırma (20.000'e kadar) ve Bellek Koruması
 export class RingBuffer {
   maxSize: number;
   buffer: Float64Array;
@@ -24,7 +24,7 @@ export class RingBuffer {
   count: number;
 
   constructor(maxSize: number = 1000) {
-    this.maxSize = Math.max(100, Math.min(maxSize, 5000));
+    this.maxSize = Math.max(1, Math.min(maxSize, 20000));
     this.buffer = new Float64Array(this.maxSize);
     this.head = 0;
     this.count = 0;
@@ -38,14 +38,18 @@ export class RingBuffer {
 
   getValues(): number[] {
     if (this.count < this.maxSize) {
-      return Array.from(this.buffer.slice(0, this.count));
+      return Array.from(this.buffer.subarray(0, this.count));
     }
-    return Array.from(this.buffer);
+    const result = new Float64Array(this.maxSize);
+    const tailCount = this.maxSize - this.head;
+    result.set(this.buffer.subarray(this.head), 0);
+    result.set(this.buffer.subarray(0, this.head), tailCount);
+    return Array.from(result);
   }
 
-  // Dinamik Boyut Ayarı (500 - 2000 Arası)
+  // Dinamik Boyut Ayarı (1 - 20000 Arası)
   resize(newSize: number): void {
-    const validSize = Math.max(100, Math.min(newSize, 5000));
+    const validSize = Math.max(1, Math.min(newSize, 20000));
     if (validSize === this.maxSize) return;
 
     const currentValues = this.getValues();
@@ -85,10 +89,21 @@ export class BucketManager {
   // Kayan Pencere (Maksimum 15 dakika = 900,000ms saklar)
   rollingTrades: TimedTradeItem[] = [];
   lastPruneTime: number = 0;
+  private readonly maxRollingTrades = 20000;
 
   // Debounce mekanizması (recalculatePercentiles)
   private lastPercentileCalcTime: number = 0;
   private readonly percentileDebounceMs: number = 250;
+
+  // Constants (Magic Numbers Temizliği)
+  private readonly TIMEFRAME_MULTIPLIERS: Record<TimeframeOption, number> = {
+    '1m': 1.0,
+    '5m': 2.0,
+    '15m': 3.5,
+  };
+  private readonly RETAIL_THRESHOLD_BASE = 500;
+  private readonly SMART_THRESHOLD_BASE = 1000;
+  private readonly MOMENTUM_THRESHOLD_BASE = 2000;
 
   onThresholdUpdate?: (thresholds: BucketThresholds, mode: string) => void;
   onCustomBucketsUpdate?: (buckets: CustomBucket[]) => void;
@@ -115,6 +130,17 @@ export class BucketManager {
       whale: { id: 'whale', name: 'Balina', icon: '🐋', buyVol: 0, sellVol: 0, count: 0 },
       leviathan: { id: 'leviathan', name: 'Leviathan', icon: '🦑', buyVol: 0, sellVol: 0, count: 0 },
     };
+  }
+
+  resetForNewSymbol(): void {
+    this.ringBuffer.clear();
+    this.rollingTrades = [];
+    this.stats = this.initializeStats();
+    for (const b of this.customBuckets) {
+      b.volume = 0;
+      b.tradeCount = 0;
+    }
+    this.ensureStatsKeys();
   }
 
   loadFromStorage(): void {
@@ -180,7 +206,7 @@ export class BucketManager {
     const logRanges = this.generateLogarithmicBuckets(sampleValues, 4);
 
     this.customBuckets = logRanges.map((range, i) => ({
-      id: `custom_${i}`,
+      id: `custom_init_${i}`,
       name: `B${i + 1} Log-Dilim`,
       minValue: Math.round(range.min),
       maxValue: Math.round(range.max),
@@ -255,8 +281,9 @@ export class BucketManager {
 
     this.customBuckets = newLogRanges.map((range, i) => {
       const existing = this.customBuckets[i];
+      const id = existing ? existing.id : `custom_exp_${Date.now()}_${i}`;
       return {
-        id: existing?.id || `custom_${i}`,
+        id,
         name: existing?.name || `B${i + 1} (${range.min < 1000 ? '$' + range.min : '$' + Math.round(range.min / 1000) + 'k'}+)`,
         minValue: range.min,
         maxValue: range.max,
@@ -265,11 +292,10 @@ export class BucketManager {
         isActive: existing?.isActive ?? true,
         tradeCount: existing?.tradeCount || 0,
         volume: existing?.volume || 0,
-        isSmartMoney: i >= Math.floor(targetCount * 0.6),
+        isSmartMoney: existing?.isSmartMoney !== undefined ? existing.isSmartMoney : (i >= Math.floor(targetCount * 0.6)),
       };
     });
 
-    this.customBuckets.sort((a, b) => a.minValue - b.minValue);
     this.ensureStatsKeys();
     this.saveToStorage();
     return true;
@@ -288,7 +314,6 @@ export class BucketManager {
     };
 
     this.customBuckets.push(newBucket);
-    this.customBuckets.sort((a, b) => a.minValue - b.minValue);
     this.ensureStatsKeys();
     this.saveToStorage();
     return true;
@@ -296,12 +321,12 @@ export class BucketManager {
 
   removeCustomBucket(id: string): void {
     this.customBuckets = this.customBuckets.filter((b) => b.id !== id);
+    delete this.stats[id];
     this.saveToStorage();
   }
 
   updateCustomBucket(id: string, updates: Partial<CustomBucket>): void {
     this.customBuckets = this.customBuckets.map((b) => (b.id === id ? { ...b, ...updates } : b));
-    this.customBuckets.sort((a, b) => a.minValue - b.minValue);
     this.saveToStorage();
   }
 
@@ -364,7 +389,7 @@ export class BucketManager {
     }
   }
 
-  // Debounce korumalı persentil hesaplama (Teknik Eleştiri #3 Çözümü)
+  // Debounce korumalı persentil hesaplama (250ms)
   recalculatePercentiles(now: number): void {
     if (this.mode !== 'dynamic') return;
     if (now - this.lastPercentileCalcTime < this.percentileDebounceMs) return;
@@ -400,31 +425,21 @@ export class BucketManager {
     }
   }
 
-  // Binary Search O(log N) Custom Bucket Sınıflandırma
+  // Custom Bucket Eşleme - Kullanıcı Sıralamasına Göre Güvenli Bulma
   classifyCustomBucket(notionalValue: number): CustomBucket | null {
     if (this.customBuckets.length === 0) return null;
 
-    let left = 0;
-    let right = this.customBuckets.length - 1;
-
-    while (left <= right) {
-      const mid = (left + right) >> 1;
-      const b = this.customBuckets[mid];
-
-      if (notionalValue >= b.minValue && notionalValue < b.maxValue) {
+    // Aktif custom bucket'ler arasında eşleşeni bul
+    for (const b of this.customBuckets) {
+      if (b.isActive && notionalValue >= b.minValue && notionalValue < b.maxValue) {
         return b;
-      } else if (notionalValue < b.minValue) {
-        right = mid - 1;
-      } else {
-        left = mid + 1;
       }
     }
 
-    if (notionalValue <= this.customBuckets[0].minValue) return this.customBuckets[0];
-    return this.customBuckets[this.customBuckets.length - 1];
+    return null;
   }
 
-  // ÇEKİRDEK İŞLEM İŞLEYİCİSİ - tradeTime ZORUNLU (Teknik Eleştiri #1 Çözümü)
+  // ÇEKİRDEK İŞLEM İŞLEYİCİSİ - tradeTime ZORUNLU
   processTrade(
     price: number,
     quantity: number,
@@ -466,7 +481,7 @@ export class BucketManager {
     }
     this.stats[defaultBucket].count += 1;
 
-    // 3. Custom Bucket Binary Search Sınıflandırması
+    // 3. Custom Bucket Sınıflandırması
     const matchedCustom = this.classifyCustomBucket(notionalValue);
     if (matchedCustom) {
       matchedCustom.volume += notionalValue;
@@ -491,7 +506,7 @@ export class BucketManager {
       bucket: matchedCustom ? matchedCustom.id : defaultBucket,
     });
 
-    // 5. Binary Search ile O(log N) Prune (Teknik Eleştiri #2 Çözümü)
+    // 5. Binary Search ile O(log N) Prune ve Max Sınır Kontrolü
     if (tradeTime - this.lastPruneTime > 1000) {
       this.pruneRollingTrades(tradeTime);
       this.lastPruneTime = tradeTime;
@@ -513,29 +528,36 @@ export class BucketManager {
     };
   }
 
-  // BINARY SEARCH İLE O(log N) BUDAMA (Teknik Eleştiri #2)
+  // BINARY SEARCH İLE O(log N) BUDAMA + Max Boyut Sınırı (Sorun #14 Çözümü)
   pruneRollingTrades(currentTime: number): void {
     // En uzun timeframe olan 15 dakikadan (900,000ms) eski kayıtları temizle
     const cutoff = currentTime - 900_000;
     const len = this.rollingTrades.length;
-    if (len === 0 || this.rollingTrades[0].time >= cutoff) return;
+    if (len === 0) return;
 
-    let low = 0;
-    let high = len - 1;
-    let pruneIndex = 0;
+    if (this.rollingTrades[0].time < cutoff) {
+      let low = 0;
+      let high = len - 1;
+      let pruneIndex = 0;
 
-    while (low <= high) {
-      const mid = (low + high) >> 1;
-      if (this.rollingTrades[mid].time < cutoff) {
-        pruneIndex = mid + 1;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (this.rollingTrades[mid].time < cutoff) {
+          pruneIndex = mid + 1;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+
+      if (pruneIndex > 0) {
+        this.rollingTrades.splice(0, pruneIndex);
       }
     }
 
-    if (pruneIndex > 0) {
-      this.rollingTrades.splice(0, pruneIndex);
+    // Ekstra Güvenlik: maxRollingTrades sınırını aşarsa eski kayıtları buda
+    if (this.rollingTrades.length > this.maxRollingTrades) {
+      this.rollingTrades = this.rollingTrades.slice(-this.maxRollingTrades);
     }
   }
 
@@ -561,7 +583,7 @@ export class BucketManager {
 
     for (let i = this.rollingTrades.length - 1; i >= 0; i--) {
       const t = this.rollingTrades[i];
-      if (t.time < cutoff) break; // Kronolojik olduğundan geriye doğru hızlıca durur!
+      if (t.time < cutoff) break; // Kronolojik olduğundan geriye doğru hızlıca durur
 
       if (t.bucket === bucketKey) {
         count++;
@@ -667,7 +689,7 @@ export class BucketManager {
     return list;
   }
 
-  // Multi-Timeframe Smart Money Uyumsuzluk Radarı (1m, 5m, 15m)
+  // Multi-Timeframe Smart Money Uyumsuzluk Radarı (Sorun #1 ve #17 Çözümü)
   getSmartMoneyDivergence(
     tf: TimeframeOption = '1m',
     currentTime: number = Date.now()
@@ -678,17 +700,42 @@ export class BucketManager {
 
     let retailDelta = shrimpStats.rollingDelta;
     let smartDelta = whaleStats.rollingDelta + leviathanStats.rollingDelta;
+    let retailBuyVol = shrimpStats.rollingBuyVol;
+    let retailSellVol = shrimpStats.rollingSellVol;
+    let smartBuyVol = whaleStats.rollingBuyVol + leviathanStats.rollingBuyVol;
+    let smartSellVol = whaleStats.rollingSellVol + leviathanStats.rollingSellVol;
 
+    // Doğru Sınıflandırma: isSmartMoney=true ise smartDelta, değilse retailDelta
     for (const b of this.customBuckets) {
+      if (!b.isActive) continue;
       const stats = this.getBucketRollingStats(b.id, tf, currentTime);
-      if (b.isSmartMoney) smartDelta += stats.rollingDelta;
-      else if (b.maxValue <= 2000) retailDelta += stats.rollingDelta;
+      if (b.isSmartMoney) {
+        smartDelta += stats.rollingDelta;
+        smartBuyVol += stats.rollingBuyVol;
+        smartSellVol += stats.rollingSellVol;
+      } else {
+        retailDelta += stats.rollingDelta;
+        retailBuyVol += stats.rollingBuyVol;
+        retailSellVol += stats.rollingSellVol;
+      }
     }
 
+    const totalBuy = retailBuyVol + smartBuyVol;
+    const totalSell = retailSellVol + smartSellVol;
+    const overallTotal = totalBuy + totalSell;
+    const overallObi = overallTotal > 0 ? Math.round(((totalBuy - totalSell) / overallTotal) * 100) : 0;
+
+    const smartTotal = smartBuyVol + smartSellVol;
+    const smartObi = smartTotal > 0 ? Math.round(((smartBuyVol - smartSellVol) / smartTotal) * 100) : 0;
+
+    const retailTotal = retailBuyVol + retailSellVol;
+    const retailObi = retailTotal > 0 ? Math.round(((retailBuyVol - retailSellVol) / retailTotal) * 100) : 0;
+
     // Timeframe katsayısı (5m ve 15m'de eşikler ölçeklenir)
-    const tfMultiplier = tf === '15m' ? 3.5 : tf === '5m' ? 2.0 : 1.0;
-    const retailThresh = 500 * tfMultiplier;
-    const smartThresh = 1000 * tfMultiplier;
+    const tfMultiplier = this.TIMEFRAME_MULTIPLIERS[tf] || 1.0;
+    const retailThresh = this.RETAIL_THRESHOLD_BASE * tfMultiplier;
+    const smartThresh = this.SMART_THRESHOLD_BASE * tfMultiplier;
+    const momentumThresh = this.MOMENTUM_THRESHOLD_BASE * tfMultiplier;
 
     if (retailDelta < -retailThresh && smartDelta > smartThresh) {
       const conf = Math.min(99, Math.round(68 + (Math.abs(smartDelta) / (10_000 * tfMultiplier)) * 20));
@@ -696,6 +743,9 @@ export class BucketManager {
         timeframe: tf,
         retailDelta,
         smartDelta,
+        overallObi,
+        smartObi,
+        retailObi,
         signal: 'ACCUMULATION',
         signalTitle: `🟢 BOĞA EMİLİMİ (${tf.toUpperCase()} SMART ACCUMULATION)`,
         signalDesc: 'Karidesler panikle satıyor, Balina ve Leviathan tüm satışı marketten emiyor! Yukarı patlama ihtimali yüksek.',
@@ -710,6 +760,9 @@ export class BucketManager {
         timeframe: tf,
         retailDelta,
         smartDelta,
+        overallObi,
+        smartObi,
+        retailObi,
         signal: 'DISTRIBUTION',
         signalTitle: `🔴 DAĞITIM & TUZAK (${tf.toUpperCase()} SMART DISTRIBUTION)`,
         signalDesc: 'Karidesler FOMO ile alıyor, Akıllı Para tepeden boşaltıyor! Tuzak kapısı kapanmak üzere.',
@@ -718,11 +771,14 @@ export class BucketManager {
       };
     }
 
-    if (smartDelta > 2000 * tfMultiplier && retailDelta > 0) {
+    if (smartDelta > momentumThresh && retailDelta > 0) {
       return {
         timeframe: tf,
         retailDelta,
         smartDelta,
+        overallObi,
+        smartObi,
+        retailObi,
         signal: 'BULL_MOMENTUM',
         signalTitle: `⚡ GÜÇLÜ BOĞA AKIŞI (${tf.toUpperCase()} LONG MOMENTUM)`,
         signalDesc: 'Hem Akıllı Para hem piyasa tek yöne agresif alım pompalıyor. Trend yukarı yönlü ezici.',
@@ -731,11 +787,14 @@ export class BucketManager {
       };
     }
 
-    if (smartDelta < -2000 * tfMultiplier && retailDelta < 0) {
+    if (smartDelta < -momentumThresh && retailDelta < 0) {
       return {
         timeframe: tf,
         retailDelta,
         smartDelta,
+        overallObi,
+        smartObi,
+        retailObi,
         signal: 'BEAR_MOMENTUM',
         signalTitle: `⚡ GÜÇLÜ AYI BASKISI (${tf.toUpperCase()} SHORT MOMENTUM)`,
         signalDesc: 'Tahtada acımasız blok satışlar akıyor. Likidite alt kademelere süpürülüyor.',
@@ -748,6 +807,9 @@ export class BucketManager {
       timeframe: tf,
       retailDelta,
       smartDelta,
+      overallObi,
+      smartObi,
+      retailObi,
       signal: 'NEUTRAL',
       signalTitle: `⚖️ DENGELİ / NÖTR PİYASA (${tf.toUpperCase()})`,
       signalDesc: 'Akıllı para ve retail arasında net bir yön uyuşmazlığı yok, kademeler test ediliyor.',
@@ -757,7 +819,7 @@ export class BucketManager {
   }
 }
 
-// 3. WEBSOCKET YÖNETİCİSİ - Otomatik Reconnect & Heartbeat (Teknik Eleştiri #5 Çözümü)
+// 3. WEBSOCKET YÖNETİCİSİ - Otomatik Reconnect & Heartbeat
 export class WSManager {
   bucketManager: BucketManager;
   ws: WebSocket | null = null;
@@ -784,8 +846,13 @@ export class WSManager {
   }
 
   connect(symbol: string): void {
+    const nextSymbol = symbol.toLowerCase().trim();
+    if (this.currentSymbol && this.currentSymbol !== nextSymbol) {
+      this.bucketManager.resetForNewSymbol();
+    }
+
     this.isExplicitDisconnect = false;
-    this.currentSymbol = symbol.toLowerCase().trim();
+    this.currentSymbol = nextSymbol;
 
     if (this.reconnectTimeoutId) {
       clearTimeout(this.reconnectTimeoutId);
@@ -798,8 +865,53 @@ export class WSManager {
     this.log(`🚀 BAŞLATILIYOR: ${symbol.toUpperCase()} stream ve bootstrap`, 'info');
 
     this.fetchBootstrapVolume();
+    this.fetchRecentTrades();
     this.startSocket();
     this.startHeartbeatCheck();
+  }
+
+  fetchRecentTrades(): void {
+    const sym = this.currentSymbol.toUpperCase();
+    fetch(`https://fapi.binance.com/fapi/v1/trades?symbol=${sym}&limit=35`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((trades: any[]) => {
+        if (!Array.isArray(trades) || trades.length === 0) return;
+        this.log(`⚡ REST BOOTSTRAP: ${trades.length} gerçek işlem anında hafızaya aktarıldı.`, 'info');
+        for (const t of trades) {
+          const price = parseFloat(t.price);
+          const qty = parseFloat(t.qty);
+          const isBuyerMaker = Boolean(t.isBuyerMaker);
+          const tradeTime = t.time || Date.now();
+          const tradeId = t.id || Date.now();
+
+          const { bucket, bucketName, bucketIcon, notionalValue } = this.bucketManager.processTrade(
+            price,
+            qty,
+            isBuyerMaker,
+            tradeTime
+          );
+
+          if (this.onTrade) {
+            this.onTrade({
+              id: tradeId,
+              price,
+              qty,
+              notional: notionalValue,
+              isBuyerMaker,
+              time: tradeTime,
+              bucket,
+              bucketName,
+              bucketIcon,
+            });
+          }
+        }
+      })
+      .catch((err) => {
+        this.log(`⚠️ REST bootstrap uyarısı: ${err.message}`, 'warn');
+      });
   }
 
   private startSocket(): void {
@@ -828,11 +940,6 @@ export class WSManager {
       this.lastMessageTime = Date.now();
       this.log(`✅ WS BAĞLANDI: ${this.currentSymbol.toUpperCase()} Binance Futures stream canlı!`, 'success');
 
-      this.updateStatusDOM(
-        `Status: Bağlı (${this.currentSymbol.toUpperCase()})`,
-        'p-3 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl font-mono font-bold text-sm shadow-xs flex items-center gap-2'
-      );
-
       if (this.onStatusChange) {
         this.onStatusChange('connected', `Bağlı (${this.currentSymbol.toUpperCase()})`);
       }
@@ -856,8 +963,6 @@ export class WSManager {
           tradeTime
         );
 
-        this.updatePriceDOM(price);
-
         if (this.onTrade) {
           this.onTrade({
             id: tradeId,
@@ -878,10 +983,6 @@ export class WSManager {
 
     this.ws.onerror = () => {
       this.log(`❌ WS HATA: ${this.currentSymbol.toUpperCase()} akışında kopma oldu!`, 'error');
-      this.updateStatusDOM(
-        'Status: Bağlantı Hatası!',
-        'p-3 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl font-mono font-bold text-sm shadow-xs flex items-center gap-2'
-      );
       if (this.onStatusChange) {
         this.onStatusChange('error', 'Bağlantı Hatası!');
       }
@@ -893,15 +994,11 @@ export class WSManager {
         this.handleReconnect();
       } else {
         this.log(`ℹ️ WS KAPANDI: ${this.currentSymbol.toUpperCase()}`, 'info');
-        this.updateStatusDOM(
-          'Status: Bağlantı Kapalı',
-          'p-3 bg-stone-100 text-stone-600 border border-stone-200 rounded-xl font-mono text-sm'
-        );
       }
     };
   }
 
-  // Exponential Backoff ile Otomatik Yeniden Bağlanma (Teknik Eleştiri #5)
+  // Exponential Backoff ile Otomatik Yeniden Bağlanma
   private handleReconnect(): void {
     if (this.isExplicitDisconnect || !this.autoReconnectEnabled || !this.currentSymbol) return;
 
@@ -953,24 +1050,6 @@ export class WSManager {
       });
   }
 
-  private updatePriceDOM(currentPrice: number): void {
-    const priceElem = document.getElementById('price-val');
-    if (priceElem) {
-      priceElem.innerText = `$${currentPrice.toLocaleString(undefined, {
-        minimumFractionDigits: currentPrice < 1 ? 4 : 2,
-        maximumFractionDigits: currentPrice < 1 ? 6 : 2,
-      })}`;
-    }
-  }
-
-  private updateStatusDOM(text: string, className: string): void {
-    const statusElem = document.getElementById('ws-status');
-    if (statusElem) {
-      statusElem.innerText = text;
-      statusElem.className = className;
-    }
-  }
-
   disconnect(): void {
     this.isExplicitDisconnect = true;
     if (this.reconnectTimeoutId) {
@@ -990,10 +1069,6 @@ export class WSManager {
     if (this.onStatusChange) {
       this.onStatusChange('disconnected', 'Bağlantı Kesildi');
     }
-    this.updateStatusDOM(
-      'Status: Bağlantı Kesildi',
-      'p-3 bg-stone-100 text-stone-600 border border-stone-200 rounded-xl font-mono text-sm'
-    );
   }
 
   private log(msg: string, type: 'info' | 'warn' | 'success' | 'error'): void {
