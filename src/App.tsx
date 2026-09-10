@@ -630,6 +630,7 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         isRunning={isRunning}
+        connectionState={connectionState}
         totalBuckets={sortedBuckets.length > 0 ? sortedBuckets.length : (customBuckets.length + 4)}
       />
 
