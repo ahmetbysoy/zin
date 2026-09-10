@@ -1,19 +1,15 @@
-import React, { useState } from 'react';
-import { 
-  BarChart3, 
-  Download, 
-  Flame, 
-  GitCompare, 
-  Layers, 
-  Percent, 
-  Scale, 
-  TrendingDown, 
-  TrendingUp, 
-  Zap,
-  Clock,
-  Activity
+import React, { useState, useMemo, useRef, useEffect, useCallback, memo } from 'react';
+import {
+  BarChart3,
+  Download,
+  GitCompare,
+  Layers,
+  Scale,
+  TrendingDown,
+  TrendingUp,
 } from 'lucide-react';
 import { BucketManager } from '../engine';
+import { generateStatsSnapshot, StatsSnapshot, BucketMatrixRow } from '../statsEngine';
 import { TimeframeOption } from '../types';
 
 interface StatsViewProps {
@@ -21,36 +17,30 @@ interface StatsViewProps {
   activeSymbol: string;
 }
 
-// Standart Finansal Para Formatı: Asla "$-49.048" basmaz! Doğrusu: "-$49,048" ve "+$12,450"
-export const formatSignedUsd = (val: number): string => {
-  if (val === 0 || isNaN(val)) return '$0';
-  const isNeg = val < 0;
-  const abs = Math.round(Math.abs(val)).toLocaleString('en-US');
-  return `${isNeg ? '-$' : '+$'}${abs}`;
+export const formatSignedUsd = (val?: number | null): string => {
+  if (val === undefined || val === null || isNaN(val)) return '—';
+  const abs = Math.round(Math.abs(val));
+  if (abs === 0) return '$0';
+  return `${val < 0 ? '-$' : '+$'}${abs.toLocaleString('en-US')}`;
 };
 
-export const formatCompactSignedUsd = (val: number): string => {
-  if (val === 0 || isNaN(val)) return '$0';
-  const isNeg = val < 0;
-  const sign = isNeg ? '-$' : '+$';
+export const formatCompactSignedUsd = (val?: number | null): string => {
+  if (val === undefined || val === null || isNaN(val)) return '—';
   const abs = Math.abs(val);
-  if (abs >= 1_000_000) {
-    const formatted = (abs / 1_000_000).toFixed(1).replace(/\.0$/, '');
-    return `${sign}${formatted}M`;
-  }
-  if (abs >= 1_000) {
-    const formatted = (abs / 1_000).toFixed(0);
-    return `${sign}${formatted}K`;
-  }
+  const rounded = abs >= 1000 ? abs : Math.round(abs);
+  if (rounded === 0) return '$0';
+  const sign = val < 0 ? '-$' : '+$';
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(0)}K`;
   return `${sign}${Math.round(abs)}`;
 };
 
-export const formatUsd = (val: number): string => {
-  if (isNaN(val)) return '$0';
-  return `$${Math.round(Math.abs(val)).toLocaleString('en-US')}`;
+export const formatPositiveUsd = (val?: number | null): string => {
+  if (val === undefined || val === null || isNaN(val)) return '—';
+  return `$${Math.round(Math.max(0, val)).toLocaleString('en-US')}`;
 };
 
-const getSignalLabel = (signal: string): { label: string; short: string } => {
+const getSignalLabel = (signal?: string): { label: string; short: string } => {
   switch (signal) {
     case 'ACCUMULATION':
       return { label: 'Akıllı Para Toplama', short: 'Toplama' };
@@ -60,74 +50,201 @@ const getSignalLabel = (signal: string): { label: string; short: string } => {
       return { label: 'Boğa Akışı', short: 'Boğa' };
     case 'BEAR_MOMENTUM':
       return { label: 'Ayı Akışı', short: 'Ayı' };
-    default:
+    case 'NEUTRAL':
       return { label: 'Nötr Akış', short: 'Nötr' };
+    default:
+      return { label: 'Bilinmeyen / Analiz Ediliyor', short: 'Bekleniyor' };
   }
 };
 
-export const StatsView: React.FC<StatsViewProps> = ({
-  bucketManager,
-  activeSymbol,
-}) => {
+// DRY: Tekrar kullanılabilir, optimize Bipolar OBI Göstergesi
+const OBIGauge = memo(function OBIGauge({
+  title,
+  value,
+  note,
+  hasVolume = true,
+}: {
+  title: string;
+  value: number;
+  note: string;
+  hasVolume?: boolean;
+}) {
+  return (
+    <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold text-stone-800 dark:text-stone-200">{title}</span>
+        <span
+          className={`text-xs font-mono font-black tabular-nums ${
+            !hasVolume ? 'text-stone-400' : value >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+          }`}
+        >
+          {hasVolume ? `${value >= 0 ? '+' : ''}${value}%` : 'Veri Bekleniyor'}
+        </span>
+      </div>
+      <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
+        <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
+        <div className="w-1/2 h-full flex justify-end">
+          {hasVolume && value < 0 && (
+            <div
+              className="h-full bg-rose-500 transition-all duration-300 rounded-full"
+              style={{ width: `${Math.min(100, Math.abs(value))}%` }}
+            />
+          )}
+        </div>
+        <div className="w-1/2 h-full flex justify-start">
+          {hasVolume && value > 0 && (
+            <div
+              className="h-full bg-emerald-500 transition-all duration-300 rounded-full"
+              style={{ width: `${Math.min(100, value)}%` }}
+            />
+          )}
+        </div>
+      </div>
+      <div className="flex justify-between text-[10px] font-mono text-stone-400">
+        <span>Satıcı Baskısı</span>
+        <span>Alıcı Baskısı</span>
+      </div>
+      <p className="text-[10px] text-stone-500 font-mono">{note}</p>
+    </div>
+  );
+});
+
+// Masaüstü Tablo Satırı: Memoized
+const TableRow = memo(function TableRow({ row }: { row: BucketMatrixRow }) {
+  const d1 = row.b1 ? row.b1.rollingDelta ?? 0 : null;
+  const d5 = row.b5 ? row.b5.rollingDelta ?? 0 : null;
+  const d15 = row.b15 ? row.b15.rollingDelta ?? 0 : null;
+  const vol5 = row.b5 ? (row.b5.rollingBuyVol ?? 0) + (row.b5.rollingSellVol ?? 0) : null;
+
+  return (
+    <tr className="hover:bg-rose-50/40 dark:hover:bg-stone-800/40 transition-colors group">
+      <td className="p-2.5 whitespace-nowrap sticky left-0 bg-white dark:bg-stone-900 group-hover:bg-rose-50/70 dark:group-hover:bg-stone-800/80 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
+        <div className="flex items-center gap-2">
+          <span className="text-lg shrink-0">{row.icon}</span>
+          <div className="flex flex-col">
+            <span className="font-bold text-stone-900 dark:text-stone-100">{row.name}</span>
+            <span
+              className={`inline-block w-fit px-1.5 py-0.5 rounded text-[9px] font-bold mt-0.5 ${
+                row.isSmartMoney
+                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                  : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
+              }`}
+            >
+              {row.isSmartMoney ? 'Smart Money' : 'Retail'}
+            </span>
+          </div>
+        </div>
+      </td>
+      <td
+        className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[105px] tabular-nums ${
+          d1 === null ? 'text-stone-400' : d1 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+        }`}
+      >
+        {formatSignedUsd(d1)}
+      </td>
+      <td
+        className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[110px] tabular-nums ${
+          d5 === null ? 'text-stone-400' : d5 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+        }`}
+      >
+        {formatSignedUsd(d5)}
+      </td>
+      <td
+        className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[115px] tabular-nums ${
+          d15 === null ? 'text-stone-400' : d15 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+        }`}
+      >
+        {formatSignedUsd(d15)}
+      </td>
+      <td className="p-2.5 text-right font-medium text-stone-600 dark:text-stone-400 whitespace-nowrap min-w-[100px] tabular-nums">
+        {formatPositiveUsd(vol5)}
+      </td>
+    </tr>
+  );
+});
+
+// Mobil Kart Bileşeni: Memoized
+const MobileBucketCard = memo(function MobileBucketCard({ row }: { row: BucketMatrixRow }) {
+  const d1 = row.b1 ? row.b1.rollingDelta ?? 0 : null;
+  const d5 = row.b5 ? row.b5.rollingDelta ?? 0 : null;
+  const d15 = row.b15 ? row.b15.rollingDelta ?? 0 : null;
+  const vol5 = row.b5 ? (row.b5.rollingBuyVol ?? 0) + (row.b5.rollingSellVol ?? 0) : null;
+
+  return (
+    <div className="p-2.5 rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-800/40 active:scale-[0.98] transition-transform">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-base shrink-0">{row.icon}</span>
+          <span className="font-bold text-xs text-stone-900 dark:text-stone-100 truncate">{row.name}</span>
+        </div>
+        <span
+          className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+            row.isSmartMoney
+              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+              : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
+          }`}
+        >
+          {row.isSmartMoney ? 'Smart' : 'Retail'}
+        </span>
+      </div>
+      <div className="grid grid-cols-4 gap-1 font-mono text-[10px] tabular-nums">
+        <div className="flex flex-col">
+          <span className="text-stone-400">1m</span>
+          <span className={`font-bold ${d1 === null ? 'text-stone-400' : d1 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+            {formatCompactSignedUsd(d1)}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-stone-400">5m</span>
+          <span className={`font-bold ${d5 === null ? 'text-stone-400' : d5 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+            {formatCompactSignedUsd(d5)}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-stone-400">15m</span>
+          <span className={`font-bold ${d15 === null ? 'text-stone-400' : d15 >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+            {formatCompactSignedUsd(d15)}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-stone-400">5m Hacim</span>
+          <span className="font-bold text-stone-600 dark:text-stone-400">
+            {vol5 === null ? '—' : formatCompactSignedUsd(vol5).replace(/[+-]/, '')}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+export const StatsView: React.FC<StatsViewProps> = ({ bucketManager, activeSymbol }) => {
   const [exportNotice, setExportNotice] = useState(false);
-  const timeframes: TimeframeOption[] = ['1m', '5m', '15m'];
-  const now = Date.now();
+  const [exporting, setExporting] = useState(false);
+  const exportTimeoutRef = useRef<any>(null);
 
-  // Veri doluluk oranını hesapla (Pencere Isınma İlerlemesi)
-  const oldestTradeTime = bucketManager.rollingTrades.length > 0 
-    ? bucketManager.rollingTrades[0].time 
-    : now;
-  const availableHistoryMs = Math.max(0, now - oldestTradeTime);
+  // 1 saniyelik interval ile sabitlenen render clock (her mikro-render'da useMemo bozulmasını engeller)
+  const [clock, setClock] = useState<number>(() => Date.now());
 
-  const getWindowCoverage = (tf: TimeframeOption): { percent: number; isReady: boolean; text: string } => {
-    // REST Kline & AggTrade Bootstrap varsa doğrudan Canlı kabul et
-    if (bucketManager.hasHistory(tf)) {
-      return { percent: 100, isReady: true, text: 'Canlı' };
-    }
-    const targetMs = tf === '15m' ? 900_000 : tf === '5m' ? 300_000 : 60_000;
-    const ratio = Math.min(1, availableHistoryMs / targetMs);
-    const percent = Math.round(ratio * 100);
-    const isReady = percent >= 95;
-    const text = isReady ? 'Canlı' : `Isınıyor %${percent}`;
-    return { percent, isReady, text };
-  };
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    return () => {
+      clearInterval(timer);
+      if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current);
+    };
+  }, []);
 
-  const divergenceReports = timeframes.map((tf) => ({
-    tf,
-    coverage: getWindowCoverage(tf),
-    div: bucketManager.getSmartMoneyDivergence(tf, now),
-  }));
+  // StatsEngine üzerinden tek seferde snapshot üretilir (1m + 5m + 15m Union & Map O(1))
+  const snapshot: StatsSnapshot = useMemo(() => {
+    return generateStatsSnapshot(bucketManager, activeSymbol, clock);
+  }, [bucketManager, activeSymbol, clock]);
 
-  // Kategori bazlı kümülatif hacimler (5m penceresi)
-  const allBuckets5m = bucketManager.getAllBucketsSorted('hierarchy', '5m', now);
-  const smartBuckets5m = allBuckets5m.filter((b) => b.isSmartMoney);
-  const retailBuckets5m = allBuckets5m.filter((b) => !b.isSmartMoney);
+  const { flow5m, timeframes, dataQuality, bucketMatrix, allBucketCount } = snapshot;
+  const tfList: TimeframeOption[] = ['1m', '5m', '15m'];
 
-  const totalSmartBuy = smartBuckets5m.reduce((sum, b) => sum + (b.rollingBuyVol ?? 0), 0);
-  const totalSmartSell = smartBuckets5m.reduce((sum, b) => sum + (b.rollingSellVol ?? 0), 0);
-  const totalSmartVol = totalSmartBuy + totalSmartSell;
-
-  const totalRetailBuy = retailBuckets5m.reduce((sum, b) => sum + (b.rollingBuyVol ?? 0), 0);
-  const totalRetailSell = retailBuckets5m.reduce((sum, b) => sum + (b.rollingSellVol ?? 0), 0);
-  const totalRetailVol = totalRetailBuy + totalRetailSell;
-
-  const combinedVol = Math.max(1, totalSmartVol + totalRetailVol);
-  const smartRatio = Math.round((totalSmartVol / combinedVol) * 100);
-  const retailRatio = 100 - smartRatio;
-
-  const totalSmartDelta = totalSmartBuy - totalSmartSell;
-  const totalRetailDelta = totalRetailBuy - totalRetailSell;
-
-  // Order Flow Imbalance (OBI): (Buy - Sell) / (Buy + Sell)
-  const smartOBI = totalSmartVol > 0 ? Math.round((totalSmartDelta / totalSmartVol) * 100) : 0;
-  const retailOBI = totalRetailVol > 0 ? Math.round((totalRetailDelta / totalRetailVol) * 100) : 0;
-  const overallOBI = combinedVol > 0 ? Math.round(((totalSmartDelta + totalRetailDelta) / combinedVol) * 100) : 0;
-
-  // CSV Dışa Aktarma
-  const handleExportCSV = () => {
-    const buckets1m = bucketManager.getAllBucketsSorted('hierarchy', '1m', now);
-    const buckets5m = bucketManager.getAllBucketsSorted('hierarchy', '5m', now);
-    const buckets15m = bucketManager.getAllBucketsSorted('hierarchy', '15m', now);
+  // Güvenli CSV Dışa Aktarma: Revoke URL + Dosya Adı Güvenliği + Formül Enjeksiyon Koruması
+  const handleExportCSV = useCallback(() => {
+    if (exporting) return;
+    setExporting(true);
 
     const headers = [
       'Kova ID',
@@ -146,25 +263,34 @@ export const StatsView: React.FC<StatsViewProps> = ({
       '15m Islem Adedi',
     ];
 
-    const rows = buckets1m.map((b1) => {
-      const b5 = buckets5m.find((x) => x.id === b1.id) || b1;
-      const b15 = buckets15m.find((x) => x.id === b1.id) || b1;
+    const sanitizeCsvCell = (val: string): string => {
+      let s = val.replace(/"/g, '""');
+      if (/^[=+\-@]/.test(s)) {
+        s = `'${s}`;
+      }
+      return `"${s}"`;
+    };
+
+    const rows = bucketMatrix.map((row) => {
+      const b1 = row.b1;
+      const b5 = row.b5;
+      const b15 = row.b15;
 
       return [
-        `"${b1.id}"`,
-        `"${b1.name.replace(/"/g, '""')}"`,
-        b1.isSmartMoney ? '"Smart Money"' : '"Retail"',
-        b1.minValue ?? 0,
-        b1.maxValue ?? 0,
-        Math.round(b1.rollingDelta ?? 0),
-        Math.round((b1.rollingBuyVol ?? 0) + (b1.rollingSellVol ?? 0)),
-        b1.rollingCount ?? 0,
-        Math.round(b5.rollingDelta ?? 0),
-        Math.round((b5.rollingBuyVol ?? 0) + (b5.rollingSellVol ?? 0)),
-        b5.rollingCount ?? 0,
-        Math.round(b15.rollingDelta ?? 0),
-        Math.round((b15.rollingBuyVol ?? 0) + (b15.rollingSellVol ?? 0)),
-        b15.rollingCount ?? 0,
+        sanitizeCsvCell(row.id),
+        sanitizeCsvCell(row.name),
+        row.isSmartMoney ? '"Smart Money"' : '"Retail"',
+        row.minValue,
+        row.maxValue,
+        b1 ? Math.round(b1.rollingDelta ?? 0) : '',
+        b1 ? Math.round((b1.rollingBuyVol ?? 0) + (b1.rollingSellVol ?? 0)) : '',
+        b1 ? b1.rollingCount ?? 0 : '',
+        b5 ? Math.round(b5.rollingDelta ?? 0) : '',
+        b5 ? Math.round((b5.rollingBuyVol ?? 0) + (b5.rollingSellVol ?? 0)) : '',
+        b5 ? b5.rollingCount ?? 0 : '',
+        b15 ? Math.round(b15.rollingDelta ?? 0) : '',
+        b15 ? Math.round((b15.rollingBuyVol ?? 0) + (b15.rollingSellVol ?? 0)) : '',
+        b15 ? b15.rollingCount ?? 0 : '',
       ].join(',');
     });
 
@@ -172,18 +298,23 @@ export const StatsView: React.FC<StatsViewProps> = ({
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
+    const safeTimestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     link.setAttribute('href', url);
-    link.setAttribute('download', `kara_para_${activeSymbol || 'BTCUSDT'}_${new Date().toISOString().slice(0, 19)}.csv`);
+    link.setAttribute('download', `kara_para_${activeSymbol || 'BTCUSDT'}_${safeTimestamp}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
 
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
     setExportNotice(true);
-    setTimeout(() => setExportNotice(false), 3000);
-  };
+    setExporting(false);
+    if (exportTimeoutRef.current) clearTimeout(exportTimeoutRef.current);
+    exportTimeoutRef.current = setTimeout(() => setExportNotice(false), 3000);
+  }, [bucketMatrix, activeSymbol, exporting]);
 
   return (
-    <div className="space-y-2.5 sm:space-y-3">
+    <div className="space-y-2.5 sm:space-y-3 pb-[env(safe-area-inset-bottom)]">
       {/* Minimal Üst Başlık & Parite Göstergesi */}
       <div className="flex items-center justify-between px-1 py-0.5">
         <div className="flex items-center gap-2">
@@ -192,14 +323,16 @@ export const StatsView: React.FC<StatsViewProps> = ({
             Multi-Timeframe Akıllı Para Matrisi ({activeSymbol || 'BTCUSDT'})
           </h2>
         </div>
-        <span className="text-[10px] font-mono text-stone-400">
+        <span className="hidden sm:inline text-[10px] font-mono text-stone-400">
           1m • 5m • 15m Mikro-Akış & OBI
         </span>
       </div>
 
-      {/* Multi-Timeframe Minimalist Kartlar (3'lü Yan Yana, Sıfır Kaydırma) */}
+      {/* Multi-Timeframe Kartlar (3'lü Grid) */}
       <div className="grid grid-cols-3 gap-1.5 sm:gap-3">
-        {divergenceReports.map(({ tf, coverage, div }) => {
+        {tfList.map((tf) => {
+          const div = timeframes[tf];
+          const coverage = dataQuality[tf];
           const isAcc = div.signal === 'ACCUMULATION';
           const isDist = div.signal === 'DISTRIBUTION';
           const isBull = div.signal === 'BULL_MOMENTUM';
@@ -209,7 +342,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
           return (
             <div
               key={tf}
-              className={`p-2 sm:p-3 rounded-xl border transition-all shadow-2xs flex flex-col justify-between ${
+              className={`p-2 sm:p-3 rounded-xl border transition-all active:scale-[0.98] shadow-sm flex flex-col justify-between ${
                 isAcc
                   ? 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800'
                   : isDist
@@ -228,16 +361,16 @@ export const StatsView: React.FC<StatsViewProps> = ({
                     {tf.toUpperCase()}
                   </span>
                   <span
-                    className={`text-[9px] font-mono px-1 py-0.2 rounded font-bold ${
+                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${
                       coverage.isReady
                         ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
                         : 'bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300'
                     }`}
                   >
-                    {coverage.isReady ? 'Canlı' : `%${coverage.percent}`}
+                    {coverage.text}
                   </span>
                 </div>
-                <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400">
+                <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400 tabular-nums">
                   %{div.confidence}
                 </span>
               </div>
@@ -253,33 +386,23 @@ export const StatsView: React.FC<StatsViewProps> = ({
                 <span className="truncate hidden sm:inline">{sig.label}</span>
               </div>
 
-              {/* Delta Satırları (Sıkışık & Okunabilir) */}
+              {/* Delta Satırları */}
               <div className="pt-1 border-t border-stone-200/60 dark:border-stone-800/80 font-mono text-[10px] sm:text-xs space-y-0.5">
-                <div
-                  className="flex justify-between items-center"
-                  title={`Smart Delta: ${formatSignedUsd(div.smartDelta)}`}
-                >
+                <div className="flex justify-between items-center" title={`Smart Delta: ${formatSignedUsd(div.smartDelta)}`}>
                   <span className="text-stone-500 dark:text-stone-400">Smart:</span>
                   <span
-                    className={`font-bold text-right ${
-                      div.smartDelta >= 0
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-rose-600 dark:text-rose-400'
+                    className={`font-bold text-right tabular-nums ${
+                      div.smartDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
                     }`}
                   >
                     {formatCompactSignedUsd(div.smartDelta)}
                   </span>
                 </div>
-                <div
-                  className="flex justify-between items-center"
-                  title={`Retail Delta: ${formatSignedUsd(div.retailDelta)}`}
-                >
+                <div className="flex justify-between items-center" title={`Retail Delta: ${formatSignedUsd(div.retailDelta)}`}>
                   <span className="text-stone-500 dark:text-stone-400">Retail:</span>
                   <span
-                    className={`font-bold text-right ${
-                      div.retailDelta >= 0
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-rose-600 dark:text-rose-400'
+                    className={`font-bold text-right tabular-nums ${
+                      div.retailDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
                     }`}
                   >
                     {formatCompactSignedUsd(div.retailDelta)}
@@ -291,124 +414,32 @@ export const StatsView: React.FC<StatsViewProps> = ({
         })}
       </div>
 
-      {/* OBI (Order Flow Imbalance) Bipolar Gauges */}
+      {/* Trade Flow Imbalance (OBI) Bipolar Göstergeleri - DRY ve Temiz */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 sm:gap-3">
-        {/* Smart Money OBI */}
-        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Smart Money OBI</span>
-            <span className={`text-xs font-mono font-black ${smartOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-              {smartOBI >= 0 ? '+' : ''}{smartOBI}%
-            </span>
-          </div>
-          {/* Bipolar Gauge */}
-          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
-            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
-            <div className="w-1/2 h-full flex justify-end">
-              {smartOBI < 0 && (
-                <div
-                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
-                  style={{ width: `${Math.min(100, Math.abs(smartOBI))}%` }}
-                />
-              )}
-            </div>
-            <div className="w-1/2 h-full flex justify-start">
-              {smartOBI > 0 && (
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
-                  style={{ width: `${Math.min(100, smartOBI)}%` }}
-                />
-              )}
-            </div>
-          </div>
-          <div className="flex justify-between text-[10px] font-mono text-stone-400">
-            <span>Satıcı Baskısı</span>
-            <span>Alıcı Baskısı</span>
-          </div>
-          <p className="text-[10px] text-stone-500 font-mono">
-            Balina & Leviathan net emir dengesizliği (5m)
-          </p>
-        </div>
-
-        {/* Retail OBI */}
-        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Retail OBI</span>
-            <span className={`text-xs font-mono font-black ${retailOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-              {retailOBI >= 0 ? '+' : ''}{retailOBI}%
-            </span>
-          </div>
-          {/* Bipolar Gauge */}
-          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
-            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
-            <div className="w-1/2 h-full flex justify-end">
-              {retailOBI < 0 && (
-                <div
-                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
-                  style={{ width: `${Math.min(100, Math.abs(retailOBI))}%` }}
-                />
-              )}
-            </div>
-            <div className="w-1/2 h-full flex justify-start">
-              {retailOBI > 0 && (
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
-                  style={{ width: `${Math.min(100, retailOBI)}%` }}
-                />
-              )}
-            </div>
-          </div>
-          <div className="flex justify-between text-[10px] font-mono text-stone-400">
-            <span>Satıcı Baskısı</span>
-            <span>Alıcı Baskısı</span>
-          </div>
-          <p className="text-[10px] text-stone-500 font-mono">
-            Karides ve küçük yatırımcı net emir dengesizliği (5m)
-          </p>
-        </div>
-
-        {/* Overall Market Imbalance */}
-        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Piyasa Emir Dengesizliği (Imbalance)</span>
-            <span className={`text-xs font-mono font-black ${overallOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-              {overallOBI >= 0 ? '+' : ''}{overallOBI}%
-            </span>
-          </div>
-          {/* Bipolar Gauge */}
-          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
-            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
-            <div className="w-1/2 h-full flex justify-end">
-              {overallOBI < 0 && (
-                <div
-                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
-                  style={{ width: `${Math.min(100, Math.abs(overallOBI))}%` }}
-                />
-              )}
-            </div>
-            <div className="w-1/2 h-full flex justify-start">
-              {overallOBI > 0 && (
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
-                  style={{ width: `${Math.min(100, overallOBI)}%` }}
-                />
-              )}
-            </div>
-          </div>
-          <div className="flex justify-between text-[10px] font-mono text-stone-400">
-            <span>Satıcı Baskısı</span>
-            <span>Alıcı Baskısı</span>
-          </div>
-          <p className="text-[10px] text-stone-500 font-mono">
-            Tahtadaki tüm hacim üzerinde alıcı / satıcı net baskısı
-          </p>
-        </div>
+        <OBIGauge
+          title="Smart Money Imbalance"
+          value={flow5m.smart.obi}
+          note="Balina & Leviathan net emir dengesizliği (5m)"
+          hasVolume={flow5m.hasVolume}
+        />
+        <OBIGauge
+          title="Retail Imbalance"
+          value={flow5m.retail.obi}
+          note="Karides ve küçük yatırımcı net emir dengesizliği (5m)"
+          hasVolume={flow5m.hasVolume}
+        />
+        <OBIGauge
+          title="Piyasa Hacim Dengesizliği"
+          value={flow5m.overall.obi}
+          note="Tahtadaki tüm hacim üzerinde alıcı / satıcı net akış baskısı (5m)"
+          hasVolume={flow5m.hasVolume}
+        />
       </div>
 
-      {/* Dominance Ratio & Net Delta Cards */}
+      {/* Dominance Ratio & Rolling Net Delta Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 sm:gap-3">
         {/* Smart Money vs Retail Hacim Oranı */}
-        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-2.5">
           <div className="flex items-center gap-2">
             <Scale className="w-4 h-4 text-rose-500" />
             <h3 className="text-xs sm:text-sm font-bold text-stone-900 dark:text-stone-100">
@@ -417,35 +448,39 @@ export const StatsView: React.FC<StatsViewProps> = ({
           </div>
 
           <div className="space-y-1.5">
-            <div className="flex justify-between text-xs font-mono font-bold">
-              <span className="text-amber-600 dark:text-amber-400">Smart Money: %{smartRatio}</span>
-              <span className="text-stone-500 dark:text-stone-400">Retail: %{retailRatio}</span>
+            <div className="flex justify-between text-xs font-mono font-bold tabular-nums">
+              <span className="text-amber-600 dark:text-amber-400">
+                {flow5m.hasVolume ? `Smart Money: %${flow5m.smartRatio}` : 'Smart Money: %0'}
+              </span>
+              <span className="text-stone-500 dark:text-stone-400">
+                {flow5m.hasVolume ? `Retail: %${flow5m.retailRatio}` : 'Retail: %0'}
+              </span>
             </div>
 
             <div className="w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
               <div
                 className="bg-amber-500 h-full transition-all duration-300"
-                style={{ width: `${smartRatio}%` }}
+                style={{ width: `${flow5m.smartRatio}%` }}
               />
               <div
                 className="bg-stone-400 h-full transition-all duration-300"
-                style={{ width: `${retailRatio}%` }}
+                style={{ width: `${flow5m.retailRatio}%` }}
               />
             </div>
 
-            <div className="flex justify-between text-[10px] font-mono text-stone-400 pt-0.5">
-              <span>Toplam Smart: {formatUsd(totalSmartVol)}</span>
-              <span>Toplam Retail: {formatUsd(totalRetailVol)}</span>
+            <div className="flex justify-between text-[10px] font-mono text-stone-400 pt-0.5 tabular-nums">
+              <span>Smart Hacim: {formatPositiveUsd(flow5m.smart.volume)}</span>
+              <span>Retail Hacim: {formatPositiveUsd(flow5m.retail.volume)}</span>
             </div>
           </div>
         </div>
 
-        {/* Net Delta Dengesi */}
-        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
+        {/* Rolling Net Delta Dengesi */}
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-2.5">
           <div className="flex items-center gap-2">
             <GitCompare className="w-4 h-4 text-rose-500" />
             <h3 className="text-xs sm:text-sm font-bold text-stone-900 dark:text-stone-100">
-              Kümülatif Net Delta Karşılaştırması
+              Rolling Net Delta Karşılaştırması (5m)
             </h3>
           </div>
 
@@ -454,8 +489,12 @@ export const StatsView: React.FC<StatsViewProps> = ({
               <div className="text-[10px] uppercase font-sans text-amber-800 dark:text-amber-300 font-bold">
                 Smart Money Net Delta
               </div>
-              <div className={`text-sm sm:text-base font-black mt-0.5 ${totalSmartDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {formatSignedUsd(totalSmartDelta)}
+              <div
+                className={`text-sm sm:text-base font-black mt-0.5 tabular-nums ${
+                  flow5m.smart.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                }`}
+              >
+                {formatSignedUsd(flow5m.smart.delta)}
               </div>
             </div>
 
@@ -463,16 +502,20 @@ export const StatsView: React.FC<StatsViewProps> = ({
               <div className="text-[10px] uppercase font-sans text-stone-600 dark:text-stone-400 font-bold">
                 Retail Net Delta
               </div>
-              <div className={`text-sm sm:text-base font-black mt-0.5 ${totalRetailDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {formatSignedUsd(totalRetailDelta)}
+              <div
+                className={`text-sm sm:text-base font-black mt-0.5 tabular-nums ${
+                  flow5m.retail.delta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                }`}
+              >
+                {formatSignedUsd(flow5m.retail.delta)}
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Multi-Timeframe Kova Matrisi Tablosu */}
-      <div className="bg-white/95 dark:bg-stone-900 p-3.5 sm:p-4 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
+      {/* Multi-Timeframe Kova Matrisi (Mobil Kartlar & Masaüstü Tablo) */}
+      <div className="bg-white/95 dark:bg-stone-900 p-3.5 sm:p-4 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-2.5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-rose-500 shrink-0" />
@@ -481,13 +524,15 @@ export const StatsView: React.FC<StatsViewProps> = ({
             </h3>
           </div>
           <div className="flex items-center gap-2 self-start sm:self-auto">
-            <span className="text-[10px] font-mono text-stone-500 dark:text-stone-400 bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded-md">
-              {allBuckets5m.length} Aktif Kova
+            <span className="text-[10px] font-mono text-stone-500 dark:text-stone-400 bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded-md tabular-nums">
+              {allBucketCount} Toplam Kova
             </span>
             <button
               type="button"
               onClick={handleExportCSV}
-              className="px-2.5 py-1 rounded-lg bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 text-[11px] font-bold flex items-center gap-1.5 hover:bg-stone-800 dark:hover:bg-stone-200 transition-colors cursor-pointer shadow-2xs"
+              disabled={exporting}
+              aria-label="Kova matrisini CSV olarak indir"
+              className="px-2.5 py-1.5 rounded-lg bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 text-[11px] font-bold flex items-center gap-1.5 active:scale-95 transition-transform disabled:opacity-60 shadow-sm cursor-pointer"
             >
               <Download className="w-3 h-3 text-rose-400 dark:text-rose-600" />
               <span>{exportNotice ? 'İndirildi!' : 'CSV İndir'}</span>
@@ -495,64 +540,40 @@ export const StatsView: React.FC<StatsViewProps> = ({
           </div>
         </div>
 
-        {/* Mobil Uyumlu Yatay Kaydırma Zırhı - Sticky Freeze İlk Sütun */}
-        <div className="overflow-x-auto max-h-[420px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl relative">
-          <table className="w-full min-w-[590px] text-left text-xs font-mono border-collapse">
-            <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-30">
-              <tr>
-                <th className="p-2.5 whitespace-nowrap sticky left-0 bg-stone-100 dark:bg-stone-800 z-40 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
-                  Kova Adı & Tür
-                </th>
-                <th className="p-2.5 whitespace-nowrap text-right min-w-[105px]">1m Delta</th>
-                <th className="p-2.5 whitespace-nowrap text-right min-w-[110px]">5m Delta</th>
-                <th className="p-2.5 whitespace-nowrap text-right min-w-[115px]">15m Delta</th>
-                <th className="p-2.5 whitespace-nowrap text-right min-w-[100px]">5m Hacim</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
-              {allBuckets5m.map((b5) => {
-                const b1 = bucketManager.getAllBucketsSorted('hierarchy', '1m', now).find((x) => x.id === b5.id) || b5;
-                const b15 = bucketManager.getAllBucketsSorted('hierarchy', '15m', now).find((x) => x.id === b5.id) || b5;
-                const d1 = b1.rollingDelta ?? 0;
-                const d5 = b5.rollingDelta ?? 0;
-                const d15 = b15.rollingDelta ?? 0;
-                const vol5 = (b5.rollingBuyVol ?? 0) + (b5.rollingSellVol ?? 0);
+        {bucketMatrix.length === 0 ? (
+          <div className="py-8 text-center text-xs font-mono text-stone-400">Henüz kova verisi yok.</div>
+        ) : (
+          <>
+            {/* Mobil Görünüm: Yatay Kaydırmasız, Dokunma Dostu Dikey Kartlar */}
+            <div className="sm:hidden space-y-1.5 max-h-[420px] overflow-y-auto pr-0.5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:bg-stone-300 dark:[&::-webkit-scrollbar-thumb]:bg-stone-700 [&::-webkit-scrollbar-thumb]:rounded-full">
+              {bucketMatrix.map((row) => (
+                <MobileBucketCard key={row.id} row={row} />
+              ))}
+            </div>
 
-                return (
-                  <tr key={b5.id} className="hover:bg-rose-50/40 dark:hover:bg-stone-800/40 transition-colors group">
-                    <td className="p-2.5 whitespace-nowrap sticky left-0 bg-white dark:bg-stone-900 group-hover:bg-rose-50/70 dark:group-hover:bg-stone-800/80 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg shrink-0">{b5.icon}</span>
-                        <div className="flex flex-col">
-                          <span className="font-bold text-stone-900 dark:text-stone-100">{b5.name}</span>
-                          <span className={`inline-block w-fit px-1.5 py-0.2 rounded text-[9px] font-bold mt-0.5 ${
-                            b5.isSmartMoney
-                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                              : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
-                          }`}>
-                            {b5.isSmartMoney ? 'Smart Money' : 'Retail'}
-                          </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[105px] ${d1 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {formatSignedUsd(d1)}
-                    </td>
-                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[110px] ${d5 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {formatSignedUsd(d5)}
-                    </td>
-                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[115px] ${d15 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {formatSignedUsd(d15)}
-                    </td>
-                    <td className="p-2.5 text-right font-medium text-stone-600 dark:text-stone-400 whitespace-nowrap min-w-[100px]">
-                      {formatUsd(vol5)}
-                    </td>
+            {/* Masaüstü Görünüm: Dondurulmuş İlk Sütunlu Matris Tablosu */}
+            <div className="hidden sm:block overflow-x-auto max-h-[420px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl relative [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:bg-stone-300 dark:[&::-webkit-scrollbar-thumb]:bg-stone-700 [&::-webkit-scrollbar-thumb]:rounded-full">
+              <table className="w-full min-w-[590px] text-left text-xs font-mono border-collapse">
+                <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-30">
+                  <tr>
+                    <th className="p-2.5 whitespace-nowrap sticky left-0 bg-stone-100 dark:bg-stone-800 z-40 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
+                      Kova Adı & Tür
+                    </th>
+                    <th className="p-2.5 whitespace-nowrap text-right min-w-[105px]">1m Delta</th>
+                    <th className="p-2.5 whitespace-nowrap text-right min-w-[110px]">5m Delta</th>
+                    <th className="p-2.5 whitespace-nowrap text-right min-w-[115px]">15m Delta</th>
+                    <th className="p-2.5 whitespace-nowrap text-right min-w-[100px]">5m Hacim</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
+                  {bucketMatrix.map((row) => (
+                    <TableRow key={row.id} row={row} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
