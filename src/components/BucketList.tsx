@@ -20,6 +20,13 @@ interface BucketListProps {
   onOpenSettings: () => void;
 }
 
+// Standart Finansal Format: Asla "$-100" üretmez, "-$100" veya "+$100" üretir
+const formatSignedUsd = (val: number): string => {
+  if (val === 0 || isNaN(val)) return '$0';
+  const isNeg = val < 0;
+  return `${isNeg ? '-$' : '+$'}${Math.round(Math.abs(val)).toLocaleString('en-US')}`;
+};
+
 export const BucketList: React.FC<BucketListProps> = ({
   buckets,
   activeTimeframe,
@@ -106,26 +113,26 @@ export const BucketList: React.FC<BucketListProps> = ({
             />
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
             <button
               type="button"
               onClick={() => setFilterSmartOnly(!filterSmartOnly)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold border flex items-center gap-1 transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
                 filterSmartOnly
                   ? 'bg-amber-100 dark:bg-amber-950/70 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200'
                   : 'bg-stone-50 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-300'
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-              <span>Sadece Smart Money</span>
+              <span>Sadece Smart</span>
             </button>
 
-            <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500 dark:text-stone-400">
-              <Filter className="w-3.5 h-3.5 text-stone-400" />
+            <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500 dark:text-stone-400 flex-1 sm:flex-initial">
+              <Filter className="w-3.5 h-3.5 text-stone-400 shrink-0" />
               <select
                 value={sortBy}
                 onChange={(e) => onSortChange(e.target.value as SortOption)}
-                className="bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl px-2.5 py-1.5 text-xs font-bold text-stone-800 dark:text-stone-200 focus:outline-hidden"
+                className="w-full sm:w-auto bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl px-2.5 py-1.5 text-xs font-bold text-stone-800 dark:text-stone-200 focus:outline-hidden cursor-pointer"
               >
                 <option value="activity">En Çok İşlem (Aktivite)</option>
                 <option value="delta_desc">En Çok Alım (Delta +)</option>
@@ -193,7 +200,7 @@ export const BucketList: React.FC<BucketListProps> = ({
                   delta > 0 ? 'text-emerald-600 dark:text-emerald-400' : delta < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-stone-500'
                 }`}>
                   {delta > 0 ? <ArrowUpRight className="w-4 h-4 stroke-[3]" /> : delta < 0 ? <ArrowDownRight className="w-4 h-4 stroke-[3]" /> : null}
-                  <span>{delta > 0 ? '+' : ''}${Math.round(delta).toLocaleString()}</span>
+                  <span>{formatSignedUsd(delta)}</span>
                 </div>
               </div>
 

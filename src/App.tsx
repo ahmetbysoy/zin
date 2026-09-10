@@ -85,7 +85,13 @@ export default function App() {
   const [showAddCoinModal, setShowAddCoinModal] = useState(false);
   const [newCoinInput, setNewCoinInput] = useState('');
 
-  const [activeSymbol, setActiveSymbol] = useState('');
+  const [activeSymbol, setActiveSymbol] = useState<string>(() => {
+    try {
+      return localStorage.getItem('kara_para_last_symbol') || 'BTCUSDT';
+    } catch {
+      return 'BTCUSDT';
+    }
+  });
   const [isRunning, setIsRunning] = useState(false);
   const [connectionState, setConnectionState] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
@@ -261,9 +267,24 @@ export default function App() {
       setCurrentPrice(trade.price);
     };
 
-    addLog('Terminal başlatıldı. Binance Futures canlı verisine bağlanılıyor...', 'info');
+    const initialSym = (() => {
+      try {
+        return localStorage.getItem('kara_para_last_symbol') || 'BTCUSDT';
+      } catch {
+        return 'BTCUSDT';
+      }
+    })();
+    setActiveSymbol(initialSym);
+    setSymbolInput(initialSym);
+
+    addLog(`Terminal başlatıldı. ${initialSym} Binance Futures canlı verisine bağlanılıyor...`, 'info');
     // Sayfa açılır açılmaz otomatik canlı piyasa akışını başlat (0 işlem beklemesini yok et)
-    ws.connect('BTCUSDT');
+    ws.connect(initialSym);
+    bm.bootstrapFromRest(initialSym).then((count) => {
+      if (count > 0) {
+        addLog(`⚡ ${count} geçmiş işlem REST API'den yüklendi (1m/5m/15m ayrışması hazır).`, 'success');
+      }
+    });
     setIsRunning(true);
   }, [addLog]);
 
@@ -346,6 +367,7 @@ export default function App() {
       tradeBatchRef.current = [];
       setCurrentPrice(null);
       prevPriceRef.current = null;
+      bucketManagerRef.current?.reset();
       if (bucketManagerRef.current) {
         setSortedBuckets(bucketManagerRef.current.getAllBucketsSorted(sortOption, appSettings.activeTimeframe, Date.now()));
       }
@@ -360,6 +382,11 @@ export default function App() {
     setIsRunning(true);
     addLog(`🚀 ${sym} Binance Futures canlı emir akışına bağlanılıyor...`, 'info');
     wsManagerRef.current?.connect(sym);
+    bucketManagerRef.current?.bootstrapFromRest(sym).then((count) => {
+      if (count > 0) {
+        addLog(`⚡ ${count} geçmiş işlem REST API'den yüklendi (${sym} 1m/5m/15m hazır).`, 'success');
+      }
+    });
   };
 
   // Stop Stream Handler
@@ -379,116 +406,96 @@ export default function App() {
       {/* TOP HEADER & STREAM CONTROL BAR (Grafik modunda tam ekran için gizlenir) */}
       {/* ==================================================================== */}
       {activeTab !== 'chart' && (
-        <header className="sticky top-0 z-30 bg-white/95 dark:bg-stone-900/95 backdrop-blur-md border-b border-rose-200/80 dark:border-stone-800 shadow-xs px-3 py-2.5 transition-colors">
-        <div className="max-w-5xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+        <header className="sticky top-0 z-30 bg-white/95 dark:bg-stone-900/95 backdrop-blur-md border-b border-rose-200/80 dark:border-stone-800 shadow-xs px-2.5 sm:px-4 py-1.5 sm:py-2 transition-colors">
+        <div className="max-w-5xl mx-auto flex items-center justify-between gap-2">
           
-          {/* Logo & Status Badge */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-rose-600 to-pink-500 flex items-center justify-center text-white font-black shadow-xs">
-                <Zap className="w-5 h-5 fill-white" />
-              </div>
-              <div>
-                <h1 className="text-sm sm:text-base font-black tracking-tight leading-none text-stone-900 dark:text-stone-100">
-                  KARA PARA <span className="text-rose-600 dark:text-rose-400">FUTURES</span>
-                </h1>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400">
-                    Akıllı Para vs Retail Radarı
-                  </span>
-                </div>
-              </div>
+          {/* Sol Kısım: Logo */}
+          <div className="flex items-center gap-1 shrink-0">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-rose-600 to-pink-500 flex items-center justify-center text-white font-black shadow-xs shrink-0">
+              <Zap className="w-4 h-4 fill-white" />
             </div>
-
-            {/* Price Badge on Mobile */}
-            <div className="md:hidden">
-              <div
-                id="price-val-mobile"
-                className={`font-mono text-sm font-black px-2.5 py-1 rounded-xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 ${
-                  priceDirection === 'up' ? 'text-emerald-600 dark:text-emerald-400' :
-                  priceDirection === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-stone-700 dark:text-stone-300'
-                }`}
-              >
-                {formatPrice(currentPrice)}
-              </div>
+            <div>
+              <h1 className="text-xs font-black tracking-tight leading-none text-stone-900 dark:text-stone-100">
+                KARA PARA <span className="text-rose-600 dark:text-rose-400">FUTURES</span>
+              </h1>
+              <span className="hidden md:inline-block text-[9px] font-mono font-bold text-stone-500 dark:text-stone-400 leading-tight">
+                Akıllı Para Radarı
+              </span>
             </div>
           </div>
 
-          {/* Controls & Quick Selector */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Real-time Price Badge on Desktop */}
-            <div
-              id="price-val-desktop"
-              className={`hidden md:block font-mono text-base font-black px-3.5 py-1 rounded-xl bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 transition-colors ${
-                priceDirection === 'up' ? 'text-emerald-600 dark:text-emerald-400' :
-                priceDirection === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-stone-700 dark:text-stone-300'
-              }`}
-            >
-              {formatPrice(currentPrice)}
-            </div>
+          {/* Orta Kısım: Canlı Fiyat Rozeti */}
+          <div
+            id="price-val"
+            className={`font-mono text-[11px] sm:text-sm font-black px-1.5 sm:px-2.5 py-0.5 rounded-lg bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 transition-colors shrink-0 ${
+              priceDirection === 'up' ? 'text-emerald-600 dark:text-emerald-400' :
+              priceDirection === 'down' ? 'text-rose-600 dark:text-rose-400' : 'text-stone-700 dark:text-stone-300'
+            }`}
+          >
+            {formatPrice(currentPrice)}
+          </div>
 
-            {/* Coin Input & Start/Stop Form */}
-            <div className="flex items-center gap-1.5 flex-1 sm:flex-initial">
-              <input
-                id="coinInput"
-                type="text"
-                value={symbolInput}
-                onChange={(e) => setSymbolInput(e.target.value.toUpperCase())}
-                onKeyDown={(e) => e.key === 'Enter' && handleStart()}
-                placeholder="BTCUSDT..."
-                className="w-28 sm:w-32 px-3 py-1.5 text-xs font-mono font-bold uppercase bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-rose-400 text-stone-900 dark:text-stone-100"
-              />
+          {/* Sağ Kısım: Form Kontrolleri (Input + Başlat/Durdur + Durum Noktası) */}
+          <div className="flex items-center gap-1 shrink-0">
+            <input
+              id="coinInput"
+              type="text"
+              value={symbolInput}
+              onChange={(e) => setSymbolInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === 'Enter' && handleStart()}
+              placeholder="BTC..."
+              className="w-16 sm:w-24 px-1.5 py-1 text-[11px] sm:text-xs font-mono font-bold uppercase bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-rose-400 text-stone-900 dark:text-stone-100"
+            />
 
-              {!isRunning ? (
-                <button
-                  id="startBtn"
-                  type="button"
-                  onClick={() => handleStart()}
-                  className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs flex items-center gap-1 shadow-xs transition-all cursor-pointer"
-                >
-                  <Play className="w-3.5 h-3.5 fill-white" />
-                  <span>BAŞLAT</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleStop}
-                  className="px-3.5 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-900 text-rose-300 font-black text-xs flex items-center gap-1 shadow-xs transition-all cursor-pointer"
-                >
-                  <Square className="w-3.5 h-3.5 fill-rose-300" />
-                  <span>DURDUR</span>
-                </button>
-              )}
-            </div>
+            {!isRunning ? (
+              <button
+                id="startBtn"
+                type="button"
+                onClick={() => handleStart()}
+                className="p-1 sm:px-2.5 sm:py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-black text-xs flex items-center gap-1 shadow-xs transition-all cursor-pointer shrink-0"
+                title="Akışı Başlat"
+              >
+                <Play className="w-3.5 h-3.5 fill-white" />
+                <span className="hidden sm:inline">BAŞLAT</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="p-1 sm:px-2.5 sm:py-1 rounded-lg bg-stone-800 hover:bg-stone-900 text-rose-300 font-black text-xs flex items-center gap-1 shadow-xs transition-all cursor-pointer shrink-0"
+                title="Akışı Durdur"
+              >
+                <Square className="w-3.5 h-3.5 fill-rose-300" />
+                <span className="hidden sm:inline">DURDUR</span>
+              </button>
+            )}
 
-            {/* WebSocket Status Indicator */}
+            {/* Kompakt Durum Noktası */}
             <div
               id="ws-status"
-              className={`p-1.5 px-2.5 rounded-xl font-mono text-[11px] font-bold border transition-colors flex items-center gap-1.5 ${
+              title={connectionState === 'connected' ? `Bağlı: ${activeSymbol}` : connectionState === 'connecting' ? 'Bağlanıyor...' : 'Bağlantı Yok'}
+              className={`p-1 rounded-lg border transition-colors flex items-center justify-center shrink-0 ${
                 connectionState === 'connected'
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800'
+                  ? 'bg-emerald-50 text-emerald-600 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-400 dark:border-emerald-800'
                   : connectionState === 'connecting'
-                  ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800'
-                  : 'bg-stone-100 text-stone-600 border-stone-200 dark:bg-stone-800 dark:text-stone-400 dark:border-stone-700'
+                  ? 'bg-amber-50 text-amber-600 border-amber-300 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-800'
+                  : 'bg-stone-100 text-stone-400 border-stone-200 dark:bg-stone-800 dark:text-stone-500 dark:border-stone-700'
               }`}
             >
-              <Radio className={`w-3.5 h-3.5 ${connectionState === 'connected' ? 'animate-pulse text-emerald-600' : ''}`} />
-              <span className="truncate max-w-[130px]">
-                {connectionState === 'connected' ? `Bağlı (${activeSymbol})` : connectionState === 'connecting' ? 'Bağlanıyor...' : 'Kapalı'}
-              </span>
+              <Radio className={`w-3.5 h-3.5 ${connectionState === 'connected' ? 'animate-pulse text-emerald-500' : ''}`} />
             </div>
           </div>
         </div>
 
-        {/* Quick Coin Bar (Dinamik Parite Listesi ve Ekleme Desteği) */}
-        <div className="max-w-5xl mx-auto flex items-center gap-1.5 pt-2 overflow-x-auto no-scrollbar">
+        {/* Quick Coin Bar (Kompakt ve Hızlı Geçiş Barı) */}
+        <div className="max-w-5xl mx-auto flex items-center gap-1 pt-1.5 pb-0.5 overflow-x-auto scrollbar-none">
           <span className="text-[10px] font-mono text-stone-400 shrink-0">Hızlı Pariteler:</span>
           {quickCoins.map((c) => (
             <div key={c} className="relative group shrink-0 flex items-center">
               <button
                 type="button"
                 onClick={() => handleStart(c)}
-                className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold transition-all ${
+                className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold transition-all cursor-pointer ${
                   activeSymbol === c && isRunning
                     ? 'bg-rose-600 text-white shadow-2xs font-black'
                     : 'bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 hover:bg-rose-100 dark:hover:bg-stone-700'
@@ -500,7 +507,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={(e) => handleRemoveQuickCoin(e, c)}
-                  className="opacity-0 group-hover:opacity-100 hover:text-rose-500 text-stone-400 text-[10px] font-black ml-0.5 transition-opacity"
+                  className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 hover:opacity-100 hover:text-rose-500 text-stone-400 text-[11px] font-black px-0.5 transition-opacity cursor-pointer"
                   title="Pariteyi kaldır"
                 >
                   ×
@@ -554,7 +561,7 @@ export default function App() {
       {/* ==================================================================== */}
       {/* MAIN CONTENT AREA BY ACTIVE TAB */}
       {/* ==================================================================== */}
-      <main className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'max-w-5xl mx-auto px-3 py-4'}>
+      <main className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'max-w-5xl mx-auto px-2.5 sm:px-3 pt-3 pb-28 sm:pb-20'}>
         {/* TradingView Chart Component (Keep-Alive: DOM'da kalıcı, sekmeler arası geçişte sıfırlanmaz) */}
         <div className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'hidden'}>
           <TradingViewChart
@@ -563,6 +570,8 @@ export default function App() {
             onBackToDashboard={() => setActiveTab('dashboard')}
             isDark={appSettings.theme === 'dark'}
             isActive={activeTab === 'chart'}
+            onSelectSymbol={(sym) => handleStart(sym)}
+            quickCoins={quickCoins}
           />
         </div>
 

@@ -11,7 +11,8 @@ import {
   Time
 } from 'lightweight-charts';
 import { WSManager } from '../engine';
-import { ArrowLeft, RefreshCw, ZoomIn, ZoomOut, RotateCcw, Maximize } from 'lucide-react';
+import { soundEngine } from '../audio';
+import { ArrowLeft, RefreshCw, ZoomIn, ZoomOut, RotateCcw, Maximize, ChevronDown, Search, X, Check, Volume2, VolumeX } from 'lucide-react';
 
 interface TradingViewChartProps {
   symbol: string;
@@ -19,6 +20,8 @@ interface TradingViewChartProps {
   onBackToDashboard: () => void;
   isDark?: boolean;
   isActive?: boolean;
+  onSelectSymbol?: (sym: string) => void;
+  quickCoins?: string[];
 }
 
 type ChartTimeframe = '1m' | '3m' | '5m' | '15m' | '1h' | '4h';
@@ -33,6 +36,8 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   onBackToDashboard,
   isDark = true,
   isActive = true,
+  onSelectSymbol,
+  quickCoins = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'DOGEUSDT', 'XRPUSDT', 'PEPEUSDT'],
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -58,6 +63,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   const [isTickPulsing, setIsTickPulsing] = useState<boolean>(false);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [tickCount, setTickCount] = useState<number>(0);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+
+  // Hızlı Parite Değiştirme Popover
+  const [showCoinSelector, setShowCoinSelector] = useState<boolean>(false);
+  const [coinSearchInput, setCoinSearchInput] = useState<string>('');
 
   // Aktif son mumu hafızada tutuyoruz (tic tic güncellemesi için)
   const currentBarRef = useRef<{
@@ -255,6 +265,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         return;
       }
 
+      // Parite fetch sırasında değiştiyse eski yanıtı atla
+      if (symbol.toUpperCase().trim() !== sym) {
+        return;
+      }
+
       const candleData: CandlestickData<Time>[] = [];
       const volumeData: HistogramData<Time>[] = [];
 
@@ -275,11 +290,44 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       }
 
       if (candleSeriesRef.current && volumeSeriesRef.current && chartRef.current) {
+        // En son mumu hafızaya al
+        const last = raw[raw.length - 1];
+        const lastTime = Math.floor(last[0] / 1000);
+        const lastClose = parseFloat(last[4]);
+
+        // Fiyat hassasiyetini sembole ve fiyata göre tam hesapla
+        let precision = 2;
+        if (lastClose >= 1000) precision = 2;
+        else if (lastClose >= 10) precision = 2;
+        else if (lastClose >= 1) precision = 4;
+        else if (lastClose >= 0.01) precision = 5;
+        else if (lastClose >= 0.0001) precision = 6;
+        else precision = 8;
+        const minMove = 1 / Math.pow(10, precision);
+
+        // KRİTİK ADIM 1: Önce formatı ayarla
+        candleSeriesRef.current.applyOptions({
+          priceFormat: {
+            type: 'price',
+            precision,
+            minMove,
+          },
+        });
+
+        // KRİTİK ADIM 2: Kullanıcı sürüklemiş olsa bile yeni coinde sağ fiyat skalasını ZORLA autoScale yap!
+        chartRef.current.priceScale('right').applyOptions({
+          autoScale: true,
+        });
+        chartRef.current.priceScale('volume').applyOptions({
+          autoScale: true,
+        });
+
+        // KRİTİK ADIM 3: Veriyi bas
         candleSeriesRef.current.setData(candleData);
         volumeSeriesRef.current.setData(volumeData);
 
         // KULLANICI İSTEĞİ: Mumlar küçük olmasın, fitContent yapılmasın!
-        // Kaydedilmiş barSpacing veya tok 18px ile son 70 muma odaklan
+        // Kaydedilmiş barSpacing veya tok 18px ile son 75 muma odaklan
         let userBarSpacing = DEFAULT_BAR_SPACING;
         try {
           const savedSpacing = parseFloat(localStorage.getItem(STORAGE_BAR_SPACING_KEY) || '');
@@ -301,22 +349,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           });
         }
 
-        // En son mumu hafızaya al
-        const last = raw[raw.length - 1];
-        const lastTime = Math.floor(last[0] / 1000);
-        const lastClose = parseFloat(last[4]);
-
-        // Fiyat hassasiyetini sembole göre dinamik ayarla (BTC için 2, küçük altcoinler için 4-6)
-        const precision = lastClose >= 1000 ? 2 : lastClose >= 1 ? 4 : 6;
-        const minMove = 1 / Math.pow(10, precision);
-        candleSeriesRef.current.applyOptions({
-          priceFormat: {
-            type: 'price',
-            precision,
-            minMove,
-          },
-        });
-
         currentBarRef.current = {
           time: lastTime,
           open: parseFloat(last[1]),
@@ -336,8 +368,28 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     }
   };
 
-  // Timeframe veya symbol değişince 600 mumu çek
+  // Timeframe veya symbol değişince eski verileri anında temizle ve 600 mumu çek
   useEffect(() => {
+    // Önceki paritenin hafıza referanslarını derhal sıfırla (glitch filtresine takılmasın)
+    currentBarRef.current = null;
+    prevPriceRef.current = null;
+    setCurrentPrice(null);
+    setTickCount(0);
+
+    // Eski mumları anında temizle ve sağ ekseni aç
+    if (candleSeriesRef.current) {
+      candleSeriesRef.current.setData([]);
+    }
+    if (volumeSeriesRef.current) {
+      volumeSeriesRef.current.setData([]);
+    }
+    if (chartRef.current) {
+      try {
+        chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+        chartRef.current.priceScale('volume').applyOptions({ autoScale: true });
+      } catch {}
+    }
+
     fetchHistoricalCandles();
   }, [symbol, timeframe]);
 
@@ -405,9 +457,9 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               if (isNaN(price) || price <= 0 || isNaN(qty) || qty < 0) return;
 
               const current = currentBarRef.current;
-              // Anormal glitch filtresi
+              // Anormal glitch filtresi (parite değiştiğinde current sıfırlandığı için yeni pariteyi engellemez)
               if (current && current.close > 0) {
-                if (price < current.close * 0.5 || price > current.close * 1.8) {
+                if (price < current.close * 0.25 || price > current.close * 4.0) {
                   return;
                 }
               }
@@ -425,6 +477,12 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               setIsTickPulsing(true);
               if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
               pulseTimeoutRef.current = setTimeout(() => setIsTickPulsing(false), 90);
+
+              // Balina Emri Sinyali ($50,000+ sert piyasa emrinde dopamin sesi)
+              const notional = price * qty;
+              if (notional >= 50000 && !isMuted) {
+                soundEngine.playSignalChime(!data.m ? 'bull' : 'bear');
+              }
 
               // Mum güncellemesi
               const tradeTimeMs = data.T || Date.now();
@@ -581,6 +639,10 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
   const handleResetZoom = () => {
     if (!chartRef.current) return;
+    try {
+      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+      chartRef.current.priceScale('volume').applyOptions({ autoScale: true });
+    } catch {}
     chartRef.current.timeScale().applyOptions({
       barSpacing: DEFAULT_BAR_SPACING,
       rightOffset: 12,
@@ -597,7 +659,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   };
 
   return (
-    <div className="relative w-full h-[calc(100vh-56px)] bg-[#090a0f] overflow-hidden select-none">
+    <div className="relative w-full h-[calc(100dvh-56px)] sm:h-[calc(100vh-56px)] bg-[#090a0f] overflow-hidden select-none">
       {/* 
         KULLANICI İSTEĞİ:
         "tam ekran yalnızca grafik olsun. sağında solunda üstünde hiçbirşey olmasın. saf grafik. geçmiş 600 mum otomatik çekilsin canlı tic tic olsun"
@@ -611,24 +673,30 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       />
 
       {/* MİNİMALİST YÜZEN KONTROL PANELEÇİK (Grafiği örtmez, şeffaf ve şık) */}
-      <div className="absolute top-3 left-3 z-30 flex items-center gap-2 bg-stone-900/85 backdrop-blur-md border border-stone-800/80 rounded-xl px-2.5 py-1.5 shadow-2xl">
+      <div className="absolute top-3 left-3 z-30 flex items-center gap-1.5 sm:gap-2 bg-stone-900/90 backdrop-blur-md border border-stone-800/80 rounded-xl px-2 py-1.5 sm:px-2.5 sm:py-1.5 shadow-2xl max-w-[calc(100vw-24px)] overflow-x-auto scrollbar-none">
         <button
           type="button"
           onClick={onBackToDashboard}
           title="Dashboard'a Dön"
-          className="flex items-center gap-1 text-xs font-bold text-stone-300 hover:text-white bg-stone-800/80 hover:bg-rose-600/80 px-2 py-1 rounded-lg transition-all"
+          className="flex items-center gap-1 text-xs font-bold text-stone-300 hover:text-white bg-stone-800/80 hover:bg-rose-600/80 px-2 py-1 rounded-lg transition-all cursor-pointer shrink-0"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">Dön</span>
         </button>
 
-        <div className="h-4 w-[1px] bg-stone-700/60" />
+        <div className="h-4 w-[1px] bg-stone-700/60 shrink-0" />
 
-        {/* Parite & Fiyat */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-black text-white tracking-wider font-mono">
-            {symbol.toUpperCase()}
-          </span>
+        {/* Parite Seçici Buton & Canlı Fiyat */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowCoinSelector(!showCoinSelector)}
+            className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-stone-800/90 hover:bg-stone-700 text-xs font-black text-white hover:text-rose-400 tracking-wider font-mono transition-all border border-stone-700/60 cursor-pointer"
+            title="Parite Değiştir"
+          >
+            <span>{symbol.toUpperCase()}</span>
+            <ChevronDown className="w-3 h-3 text-stone-400" />
+          </button>
 
           <span
             className={`text-xs sm:text-sm font-mono font-black px-1.5 py-0.5 rounded transition-all duration-75 ${
@@ -644,15 +712,15 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             }`}
           >
             {currentPrice !== null
-              ? `$${currentPrice.toLocaleString(undefined, {
-                  minimumFractionDigits: currentPrice >= 1000 ? 2 : 4,
-                  maximumFractionDigits: currentPrice >= 1000 ? 2 : 4,
+              ? `$${currentPrice.toLocaleString('en-US', {
+                  minimumFractionDigits: currentPrice >= 1000 ? 2 : currentPrice >= 1 ? 4 : currentPrice >= 0.01 ? 5 : 6,
+                  maximumFractionDigits: currentPrice >= 1000 ? 2 : currentPrice >= 1 ? 4 : currentPrice >= 0.01 ? 5 : 6,
                 })}`
               : 'Yükleniyor...'}
           </span>
 
           <span
-            className={`text-[10px] font-mono font-bold px-1 rounded ${
+            className={`text-[10px] font-mono font-bold px-1 rounded hidden xs:inline ${
               priceChange24h >= 0 ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'
             }`}
           >
@@ -660,7 +728,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           </span>
 
           {/* @trade Canlı Akış Göstergesi */}
-          <div className="flex items-center gap-1.5 bg-black/50 border border-stone-800 px-1.5 py-0.5 rounded-lg">
+          <div className="flex items-center gap-1.5 bg-black/50 border border-stone-800 px-1.5 py-0.5 rounded-lg shrink-0">
             <span className="relative flex h-2 w-2">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${wsConnected ? 'bg-emerald-400' : 'bg-rose-500'}`}></span>
               <span className={`relative inline-flex rounded-full h-2 w-2 ${wsConnected ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
@@ -676,16 +744,16 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           </div>
         </div>
 
-        <div className="h-4 w-[1px] bg-stone-700/60" />
+        <div className="h-4 w-[1px] bg-stone-700/60 shrink-0" />
 
         {/* Timeframe Seçimi (Kalıcı) */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           {(['1m', '3m', '5m', '15m', '1h', '4h'] as ChartTimeframe[]).map((tf) => (
             <button
               key={tf}
               type="button"
               onClick={() => handleTimeframeChange(tf)}
-              className={`text-[11px] font-mono px-1.5 py-0.5 rounded transition-all ${
+              className={`text-[11px] font-mono px-1.5 py-0.5 rounded transition-all cursor-pointer ${
                 timeframe === tf
                   ? 'bg-rose-600 text-white font-black shadow-sm'
                   : 'text-stone-400 hover:text-stone-200 hover:bg-stone-800'
@@ -696,15 +764,15 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           ))}
         </div>
 
-        <div className="h-4 w-[1px] bg-stone-700/60 hidden sm:block" />
+        <div className="h-4 w-[1px] bg-stone-700/60 hidden sm:block shrink-0" />
 
         {/* Zoom Hızlı Kontrolleri (Mum Boyutlandırma & Odak) */}
-        <div className="hidden sm:flex items-center gap-1">
+        <div className="hidden sm:flex items-center gap-1 shrink-0">
           <button
             type="button"
             onClick={handleZoomIn}
             title="Mumları Büyüt (+)"
-            className="p-1 text-stone-400 hover:text-white hover:bg-stone-800 rounded transition-all"
+            className="p-1 text-stone-400 hover:text-white hover:bg-stone-800 rounded transition-all cursor-pointer"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -712,7 +780,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             type="button"
             onClick={handleZoomOut}
             title="Mumları Küçült (-)"
-            className="p-1 text-stone-400 hover:text-white hover:bg-stone-800 rounded transition-all"
+            className="p-1 text-stone-400 hover:text-white hover:bg-stone-800 rounded transition-all cursor-pointer"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
@@ -720,15 +788,34 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             type="button"
             onClick={handleResetZoom}
             title="Canlıya ve İdeal Boyuta Odakla"
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono font-bold text-stone-300 hover:text-emerald-400 hover:bg-stone-800 rounded transition-all"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono font-bold text-stone-300 hover:text-emerald-400 hover:bg-stone-800 rounded transition-all cursor-pointer"
           >
             <RotateCcw className="w-3 h-3" />
             <span>Odak</span>
           </button>
         </div>
 
+        <div className="h-4 w-[1px] bg-stone-700/60 shrink-0" />
+
+        {/* Ses Aç / Kapat Dopamin Butonu */}
+        <button
+          type="button"
+          onClick={() => {
+            const nextMuted = !isMuted;
+            setIsMuted(nextMuted);
+            soundEngine.setMuted(nextMuted);
+            if (!nextMuted) soundEngine.playSignalChime('bull');
+          }}
+          title={isMuted ? 'Balina Seslerini Aç' : 'Sesi Kapat'}
+          className={`p-1 rounded-lg transition-all cursor-pointer shrink-0 ${
+            isMuted ? 'text-stone-500 hover:text-stone-300' : 'text-emerald-400 hover:text-emerald-300 bg-emerald-950/40'
+          }`}
+        >
+          {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 animate-pulse" />}
+        </button>
+
         {/* Canlı Yayın Nabzı */}
-        <div className="flex items-center gap-1 pl-1">
+        <div className="flex items-center gap-1 pl-1 shrink-0">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
@@ -739,13 +826,95 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         </div>
       </div>
 
-      {/* SAĞ ALT HIZLI ZOOM PANELEÇİĞİ (Mobilde de tek parmakla mum boyutlandırma) */}
-      <div className="absolute bottom-4 right-4 z-30 flex sm:hidden items-center gap-1 bg-stone-900/80 backdrop-blur-md border border-stone-800/80 rounded-xl p-1 shadow-2xl">
+      {/* HIZLI PARİTE DEĞİŞTİRME MODALI (Şık, karanlık, tek tıkla geçiş) */}
+      {showCoinSelector && (
+        <div className="absolute top-14 left-3 z-50 w-72 max-w-[calc(100vw-24px)] bg-stone-900/95 backdrop-blur-xl border border-stone-700/80 rounded-2xl p-3 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div className="flex items-center justify-between pb-2 border-b border-stone-800">
+            <span className="text-xs font-bold text-stone-200 font-mono flex items-center gap-1.5">
+              <Search className="w-3.5 h-3.5 text-rose-500" />
+              Parite Değiştir
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowCoinSelector(false)}
+              className="text-stone-400 hover:text-white p-1 rounded-lg hover:bg-stone-800 transition-all cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Manuel Arama / Giriş Formu */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              let clean = coinSearchInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+              if (!clean) return;
+              if (!clean.endsWith('USDT')) clean += 'USDT';
+              if (onSelectSymbol) {
+                onSelectSymbol(clean);
+              }
+              setShowCoinSelector(false);
+              setCoinSearchInput('');
+            }}
+            className="mt-2.5 flex items-center gap-1.5"
+          >
+            <input
+              type="text"
+              value={coinSearchInput}
+              onChange={(e) => setCoinSearchInput(e.target.value.toUpperCase())}
+              placeholder="Örn: DOGE, SOL, PEPE..."
+              autoFocus
+              className="flex-1 px-2.5 py-1.5 bg-stone-800/90 border border-stone-700 rounded-xl text-xs font-mono text-white placeholder-stone-500 focus:outline-none focus:border-rose-500"
+            />
+            <button
+              type="submit"
+              className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold font-mono transition-all cursor-pointer"
+            >
+              Seç
+            </button>
+          </form>
+
+          {/* Hızlı Pariteler */}
+          <div className="mt-3">
+            <span className="text-[10px] font-mono text-stone-400 uppercase tracking-wider block mb-1.5 font-bold">
+              Popüler Pariteler
+            </span>
+            <div className="grid grid-cols-3 gap-1.5 max-h-48 overflow-y-auto pr-0.5">
+              {quickCoins.map((c) => {
+                const isCurrent = c.toUpperCase() === symbol.toUpperCase();
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => {
+                      if (onSelectSymbol) {
+                        onSelectSymbol(c);
+                      }
+                      setShowCoinSelector(false);
+                    }}
+                    className={`flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                      isCurrent
+                        ? 'bg-rose-600 text-white shadow-xs'
+                        : 'bg-stone-800/70 hover:bg-stone-700 text-stone-300 hover:text-white border border-stone-700/50'
+                    }`}
+                  >
+                    <span>{c.replace('USDT', '')}</span>
+                    {isCurrent && <Check className="w-3 h-3 text-white" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SAĞ ALT HIZLI ZOOM PANELEÇİĞİ (Mobilde alt navbar ile çakışmaması için bottom-16 yapıldı) */}
+      <div className="absolute bottom-16 right-3 z-30 flex sm:hidden items-center gap-1 bg-stone-900/90 backdrop-blur-md border border-stone-700/80 rounded-xl p-1 shadow-2xl">
         <button
           type="button"
           onClick={handleZoomIn}
           title="Büyüt"
-          className="p-1.5 text-stone-300 hover:text-white bg-stone-800/60 rounded-lg"
+          className="p-2 text-stone-200 hover:text-white active:bg-stone-700 bg-stone-800/80 rounded-lg cursor-pointer"
         >
           <ZoomIn className="w-4 h-4" />
         </button>
@@ -753,7 +922,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           type="button"
           onClick={handleZoomOut}
           title="Küçült"
-          className="p-1.5 text-stone-300 hover:text-white bg-stone-800/60 rounded-lg"
+          className="p-2 text-stone-200 hover:text-white active:bg-stone-700 bg-stone-800/80 rounded-lg cursor-pointer"
         >
           <ZoomOut className="w-4 h-4" />
         </button>
@@ -761,7 +930,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           type="button"
           onClick={handleResetZoom}
           title="Odakla"
-          className="p-1.5 text-emerald-400 hover:text-emerald-300 bg-stone-800/60 rounded-lg"
+          className="p-2 text-emerald-400 hover:text-emerald-300 active:bg-stone-700 bg-stone-800/80 rounded-lg cursor-pointer"
         >
           <RotateCcw className="w-4 h-4" />
         </button>

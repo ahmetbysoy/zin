@@ -1,8 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   Activity, 
   ArrowDownRight, 
   ArrowUpRight, 
+  ChevronDown, 
+  ChevronUp, 
   Flame, 
   Layers, 
   ShieldAlert, 
@@ -27,6 +29,13 @@ interface DashboardProps {
   onNavigateToWallets: () => void;
 }
 
+// Standart Finansal Para Formatı: Asla "$-49.048" üretmez, "-$49,048" veya "+$12,450" üretir
+const formatSignedUsd = (val: number): string => {
+  if (val === 0 || isNaN(val)) return '$0';
+  const isNeg = val < 0;
+  return `${isNeg ? '-$' : '+$'}${Math.round(Math.abs(val)).toLocaleString('en-US')}`;
+};
+
 const formatPrice = (price: number): string => {
   if (price >= 1000) return `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   if (price >= 1) return `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
@@ -44,57 +53,58 @@ export const Dashboard: React.FC<DashboardProps> = ({
   activeSymbol,
   onNavigateToWallets,
 }) => {
+  const [showDetails, setShowDetails] = useState<boolean>(false);
+
   const isAccumulation = divergence.signal === 'ACCUMULATION';
   const isDistribution = divergence.signal === 'DISTRIBUTION';
   const isBullMomentum = divergence.signal === 'BULL_MOMENTUM';
   const isBearMomentum = divergence.signal === 'BEAR_MOMENTUM';
 
+  const buyerPct = typeof divergence.overallObi === 'number' 
+    ? Math.round(Math.max(5, Math.min(95, 50 + (divergence.overallObi / 2))))
+    : 50;
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       
       {/* ==================================================================== */}
-      {/* SMART MONEY DIVERGENCE RADARI (Multi-Timeframe 1m/5m/15m) */}
+      {/* SMART MONEY DIVERGENCE RADARI (Ultra Kompakt Taktik HUD) */}
       {/* ==================================================================== */}
-      <section className={`rounded-2xl p-4 sm:p-5 border transition-all shadow-xs ${
+      <section className={`rounded-xl p-2 sm:p-3.5 border transition-all shadow-xs ${
         isAccumulation
-          ? 'bg-emerald-50/95 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 ring-2 ring-emerald-400/20'
+          ? 'bg-emerald-50/95 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 ring-1 ring-emerald-400/20'
           : isDistribution
-          ? 'bg-rose-50/95 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 ring-2 ring-rose-400/20'
+          ? 'bg-rose-50/95 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 ring-1 ring-rose-400/20'
           : isBullMomentum
           ? 'bg-teal-50/95 dark:bg-teal-950/40 border-teal-300 dark:border-teal-700'
           : isBearMomentum
           ? 'bg-amber-50/95 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700'
           : 'bg-white/95 dark:bg-stone-900/90 border-pink-200/80 dark:border-stone-800'
       }`}>
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="space-y-1.5">
-            <div className="flex items-center flex-wrap gap-2">
-              <ShieldAlert className={`w-5 h-5 ${
-                isAccumulation ? 'text-emerald-600 dark:text-emerald-400' :
-                isDistribution ? 'text-rose-600 dark:text-rose-400' : 'text-stone-500 dark:text-stone-400'
-              }`} />
-              <h2 className="text-sm sm:text-base font-black tracking-tight text-stone-900 dark:text-stone-100">
-                {divergence.signalTitle}
-              </h2>
-              <span className="text-xs px-2.5 py-0.5 rounded-full font-mono font-bold bg-white/90 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-stone-800 dark:text-stone-200">
-                Güven: %{divergence.confidence}
-              </span>
-            </div>
-
-            <p className="text-xs text-stone-600 dark:text-stone-300 font-medium max-w-2xl">
-              {divergence.signalDesc}
-            </p>
+        {/* Satır 1: Başlık, Güven, Timeframe Seçici & Detay Aç/Kapa */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <ShieldAlert className={`w-4 h-4 shrink-0 ${
+              isAccumulation ? 'text-emerald-600 dark:text-emerald-400' :
+              isDistribution ? 'text-rose-600 dark:text-rose-400' : 'text-stone-500 dark:text-stone-400'
+            }`} />
+            <h2 className="text-xs sm:text-sm font-black tracking-tight text-stone-900 dark:text-stone-100 truncate">
+              {divergence.signalTitle}
+            </h2>
+            <span className="text-[10px] sm:text-xs px-1.5 py-0.2 rounded-md font-mono font-bold bg-white/90 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 text-stone-800 dark:text-stone-200 shrink-0">
+              %{divergence.confidence}
+            </span>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2.5">
-            {/* Timeframe Selector */}
-            <div className="flex bg-rose-100/70 dark:bg-stone-800 p-1 rounded-xl border border-rose-200/80 dark:border-stone-700 text-xs font-bold">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Timeframe Selector (Çok Kompakt) */}
+            <div className="flex bg-rose-100/70 dark:bg-stone-800 p-0.5 rounded-lg border border-rose-200/80 dark:border-stone-700 text-[10px] font-bold">
               {(['1m', '5m', '15m'] as TimeframeOption[]).map((tf) => (
                 <button
                   key={tf}
                   type="button"
                   onClick={() => onTimeframeChange(tf)}
-                  className={`px-2.5 py-1 rounded-lg transition-all ${
+                  className={`px-1.5 py-0.5 rounded-md transition-all cursor-pointer ${
                     activeTimeframe === tf
                       ? 'bg-rose-600 text-white shadow-2xs font-black'
                       : 'text-stone-600 dark:text-stone-300 hover:text-stone-900 dark:hover:text-white'
@@ -105,58 +115,79 @@ export const Dashboard: React.FC<DashboardProps> = ({
               ))}
             </div>
 
-            {/* Delta & OBI Badges */}
-            <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
-              <div className="px-3 py-1.5 bg-white/90 dark:bg-stone-800 rounded-xl border border-stone-200 dark:border-stone-700 shadow-2xs">
-                <span className="text-stone-400 dark:text-stone-500 text-[9px] block uppercase font-sans">RETAIL DELTA ({activeTimeframe})</span>
-                <span className={`font-bold ${divergence.retailDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
-                  {divergence.retailDelta >= 0 ? '+' : ''}${Math.round(divergence.retailDelta).toLocaleString()}
-                </span>
-              </div>
-              <div className="px-3 py-1.5 bg-white/90 dark:bg-stone-800 rounded-xl border border-stone-200 dark:border-stone-700 shadow-2xs">
-                <span className="text-stone-400 dark:text-stone-500 text-[9px] block uppercase font-sans">SMART DELTA ({activeTimeframe})</span>
-                <span className={`font-bold text-sm ${divergence.smartDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
-                  {divergence.smartDelta >= 0 ? '+' : ''}${Math.round(divergence.smartDelta).toLocaleString()}
-                </span>
-              </div>
-
-              {/* OBI DENGESİZLİK SKORU */}
-              {typeof divergence.overallObi === 'number' && (
-                <div className="px-3 py-1.5 bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 rounded-xl shadow-2xs">
-                  <span className="text-stone-400 dark:text-stone-500 text-[9px] block uppercase font-sans">OBI (IMBALANCE)</span>
-                  <span className={`font-bold text-sm ${
-                    divergence.overallObi > 10 ? 'text-emerald-400 dark:text-emerald-600' :
-                    divergence.overallObi < -10 ? 'text-rose-400 dark:text-rose-600' : 'text-stone-300 dark:text-stone-700'
-                  }`}>
-                    {divergence.overallObi > 0 ? '+' : ''}{divergence.overallObi}%
-                  </span>
-                </div>
-              )}
-            </div>
+            {/* Detay Göster / Gizle Butonu */}
+            <button
+              type="button"
+              onClick={() => setShowDetails(!showDetails)}
+              className="p-1 rounded-lg text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200 bg-white/80 dark:bg-stone-800/80 border border-stone-200/80 dark:border-stone-700 transition-all cursor-pointer"
+              title={showDetails ? 'Özeti Küçült' : 'Detayları Göster'}
+            >
+              {showDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
           </div>
         </div>
 
-        {/* Canlı OBI İlerleme Çubuğu */}
-        {typeof divergence.overallObi === 'number' && (
-          <div className="mt-3 pt-2.5 border-t border-stone-200/60 dark:border-stone-800/80 flex items-center gap-3">
-            <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400 whitespace-nowrap">
-              Emir Akışı Dengesi (Alış vs Satış):
+        {/* Satır 2: Kompakt Metrik Şeridi (RETAIL | SMART | OBI | Denge) */}
+        <div className="mt-2 grid grid-cols-4 gap-1 sm:gap-2 font-mono text-center">
+          <div className="p-1 sm:p-1.5 bg-white/90 dark:bg-stone-800/90 rounded-lg border border-stone-200/80 dark:border-stone-700/80 shadow-2xs flex flex-col justify-center">
+            <span className="text-stone-400 dark:text-stone-500 text-[8px] uppercase font-sans truncate">RETAIL</span>
+            <span className={`font-bold text-[11px] sm:text-xs truncate ${divergence.retailDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+              {formatSignedUsd(divergence.retailDelta)}
             </span>
-            <div className="flex-1 h-2 bg-stone-200 dark:bg-stone-800 rounded-full overflow-hidden flex relative">
-              <div 
-                className="bg-emerald-500 h-full transition-all duration-300"
-                style={{ width: `${Math.max(5, Math.min(95, 50 + (divergence.overallObi / 2)))}%` }}
-                title={`Alıcı Ağırlığı: %${Math.round(50 + (divergence.overallObi / 2))}`}
-              />
-              <div 
-                className="bg-rose-500 h-full transition-all duration-300"
-                style={{ width: `${Math.max(5, Math.min(95, 50 - (divergence.overallObi / 2)))}%` }}
-                title={`Satıcı Ağırlığı: %${Math.round(50 - (divergence.overallObi / 2))}`}
-              />
+          </div>
+
+          <div className="p-1 sm:p-1.5 bg-white/90 dark:bg-stone-800/90 rounded-lg border border-stone-200/80 dark:border-stone-700/80 shadow-2xs flex flex-col justify-center">
+            <span className="text-stone-400 dark:text-stone-500 text-[8px] uppercase font-sans truncate">SMART</span>
+            <span className={`font-bold text-[11px] sm:text-xs truncate ${divergence.smartDelta >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+              {formatSignedUsd(divergence.smartDelta)}
+            </span>
+          </div>
+
+          <div className="p-1 sm:p-1.5 bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 rounded-lg shadow-2xs flex flex-col justify-center">
+            <span className="text-stone-400 dark:text-stone-500 text-[8px] uppercase font-sans truncate">OBI</span>
+            <span className={`font-bold text-[11px] sm:text-xs truncate ${
+              (divergence.overallObi ?? 0) > 10 ? 'text-emerald-400 dark:text-emerald-600' :
+              (divergence.overallObi ?? 0) < -10 ? 'text-rose-400 dark:text-rose-600' : 'text-stone-300 dark:text-stone-700'
+            }`}>
+              {(divergence.overallObi ?? 0) > 0 ? '+' : ''}{divergence.overallObi ?? 0}%
+            </span>
+          </div>
+
+          <div className="p-1 sm:p-1.5 bg-white/90 dark:bg-stone-800/90 rounded-lg border border-stone-200/80 dark:border-stone-700/80 shadow-2xs flex flex-col justify-center">
+            <span className="text-stone-400 dark:text-stone-500 text-[8px] uppercase font-sans truncate">DENGE</span>
+            <span className="font-bold text-[10px] sm:text-xs truncate flex items-center justify-center gap-0.5">
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${(divergence.overallObi ?? 0) > 0 ? 'bg-emerald-500' : (divergence.overallObi ?? 0) < 0 ? 'bg-rose-500' : 'bg-stone-400'}`} />
+              <span className="truncate">{buyerPct}% Alıcı</span>
+            </span>
+          </div>
+        </div>
+
+        {/* İsteğe Bağlı Detay Alanı (Kullanıcı açtığında genişler) */}
+        {showDetails && (
+          <div className="mt-2.5 pt-2 border-t border-stone-200/60 dark:border-stone-800/80 space-y-2 animate-in fade-in duration-150">
+            <p className="text-[11px] sm:text-xs text-stone-600 dark:text-stone-300 font-medium">
+              {divergence.signalDesc}
+            </p>
+
+            {/* OBI Bar */}
+            <div className="flex items-center gap-2 pt-1">
+              <span className="text-[9px] font-mono font-bold text-stone-500 dark:text-stone-400 whitespace-nowrap">
+                Emir Akışı:
+              </span>
+              <div className="flex-1 h-1.5 bg-stone-200 dark:bg-stone-800 rounded-full overflow-hidden flex relative">
+                <div 
+                  className="bg-emerald-500 h-full transition-all duration-300"
+                  style={{ width: `${buyerPct}%` }}
+                />
+                <div 
+                  className="bg-rose-500 h-full transition-all duration-300"
+                  style={{ width: `${100 - buyerPct}%` }}
+                />
+              </div>
+              <span className="text-[9px] font-mono font-black text-stone-700 dark:text-stone-300">
+                {(divergence.overallObi ?? 0) > 0 ? 'Alıcı Hakim' : (divergence.overallObi ?? 0) < 0 ? 'Satıcı Hakim' : 'Nötr'}
+              </span>
             </div>
-            <span className="text-[10px] font-mono font-black text-stone-700 dark:text-stone-300">
-              {divergence.overallObi > 0 ? '🟢 Alıcı Hakim' : divergence.overallObi < 0 ? '🔴 Satıcı Hakim' : '⚖️ Nötr'}
-            </span>
           </div>
         )}
       </section>
@@ -207,7 +238,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     delta > 0 ? 'text-emerald-600 dark:text-emerald-400' : delta < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-stone-500'
                   }`}>
                     {delta > 0 ? <ArrowUpRight className="w-4 h-4 stroke-[3]" /> : delta < 0 ? <ArrowDownRight className="w-4 h-4 stroke-[3]" /> : null}
-                    <span>{delta > 0 ? '+' : ''}${Math.round(delta).toLocaleString()}</span>
+                    <span>{formatSignedUsd(delta)}</span>
                   </div>
                 </div>
 
@@ -246,8 +277,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
+        <div className="overflow-x-auto -mx-1 sm:mx-0">
+          <table className="w-full text-left text-xs font-mono min-w-[500px]">
             <thead>
               <tr className="border-b border-rose-100 dark:border-stone-800 text-stone-400 dark:text-stone-500">
                 <th className="pb-2 font-medium">Zaman</th>

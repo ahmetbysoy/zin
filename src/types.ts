@@ -57,6 +57,7 @@ export interface TimedTradeItem {
   notional: number;
   isBuyerMaker: boolean;
   bucket: AllBucketTypes;
+  customBucketId?: string;
 }
 
 export interface RecentTrade {

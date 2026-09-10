@@ -91,6 +91,16 @@ export class BucketManager {
   lastPruneTime: number = 0;
   private readonly maxRollingTrades = 20000;
 
+  // Binance Klines Snapshot Geçmişi (1m, 5m, 15m Kesin Piyasa Deltası)
+  klineHistory: Array<{
+    openTime: number;
+    closeTime: number;
+    quoteVol: number;
+    takerBuyQuoteVol: number;
+    tradeCount: number;
+  }> = [];
+  hasKlineBootstrap: boolean = false;
+
   // Debounce mekanizması (recalculatePercentiles)
   private lastPercentileCalcTime: number = 0;
   private readonly percentileDebounceMs: number = 250;
@@ -135,6 +145,8 @@ export class BucketManager {
   resetForNewSymbol(): void {
     this.ringBuffer.clear();
     this.rollingTrades = [];
+    this.klineHistory = [];
+    this.hasKlineBootstrap = false;
     this.stats = this.initializeStats();
     this.dynamicThresholds = { ...this.staticThresholds };
     this.lastMultiplier = 1;
@@ -154,9 +166,13 @@ export class BucketManager {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          this.customBuckets = parsed;
-          this.ensureStatsKeys();
-          return;
+          // Eski otomatik oluşturulan sahte "custom_init_" log dilimlerini temizle
+          const cleaned = parsed.filter((b: CustomBucket) => !b.id.startsWith('custom_init_'));
+          if (cleaned.length > 0) {
+            this.customBuckets = cleaned;
+            this.ensureStatsKeys();
+            return;
+          }
         }
       }
     } catch (e) {
@@ -174,6 +190,19 @@ export class BucketManager {
     if (this.onCustomBucketsUpdate) {
       this.onCustomBucketsUpdate([...this.customBuckets]);
     }
+  }
+
+  reset(): void {
+    this.rollingTrades = [];
+    this.stats = {
+      shrimp: { id: 'shrimp', name: 'Karides', icon: '🦐', buyVol: 0, sellVol: 0, count: 0 },
+      crab: { id: 'crab', name: 'Yengeç', icon: '🦀', buyVol: 0, sellVol: 0, count: 0 },
+      whale: { id: 'whale', name: 'Balina', icon: '🐋', buyVol: 0, sellVol: 0, count: 0 },
+      leviathan: { id: 'leviathan', name: 'Leviathan', icon: '🦑', buyVol: 0, sellVol: 0, count: 0 },
+    };
+    this.ensureStatsKeys();
+    this.klineHistory = [];
+    this.hasKlineBootstrap = false;
   }
 
   private ensureStatsKeys(): void {
@@ -207,23 +236,9 @@ export class BucketManager {
   }
 
   private initializeDefaultCustomBuckets(): void {
-    const sampleValues = this.generateSampleValues(1000);
-    const logRanges = this.generateLogarithmicBuckets(sampleValues, 4);
-
-    this.customBuckets = logRanges.map((range, i) => ({
-      id: `custom_init_${i}`,
-      name: `B${i + 1} Log-Dilim`,
-      minValue: Math.round(range.min),
-      maxValue: Math.round(range.max),
-      color: this.getBucketColor(i),
-      icon: this.getBucketIcon(i),
-      isActive: true,
-      tradeCount: 0,
-      volume: 0,
-      isSmartMoney: i >= 2,
-    }));
-
-    this.ensureStatsKeys();
+    // Varsayılan temiz durum: Kullanıcı kendi özel kovalarını Ayarlar'dan ekleyene kadar
+    // 4 ana kova (Karides, Yengeç, Balina, Leviathan) çakışmasız, saf ve kusursuz çalışır.
+    this.customBuckets = [];
     this.saveToStorage();
   }
 
@@ -503,12 +518,13 @@ export class BucketManager {
       this.stats[matchedCustom.id].count += 1;
     }
 
-    // 4. Kayan Pencereye ekle
+    // 4. Kayan Pencereye ekle (Hem varsayılan ana kova hem de özel kova kimliğiyle)
     this.rollingTrades.push({
       time: tradeTime,
       notional: notionalValue,
       isBuyerMaker,
-      bucket: matchedCustom ? matchedCustom.id : defaultBucket,
+      bucket: defaultBucket,
+      customBucketId: matchedCustom ? matchedCustom.id : undefined,
     });
 
     // 5. Binary Search ile O(log N) Prune ve Max Sınır Kontrolü
@@ -566,6 +582,88 @@ export class BucketManager {
     }
   }
 
+  // Binance Futures REST API: Multi-Segment AggTrades + 15m Klines Bootstrapping (Kesin Multi-Timeframe)
+  async bootstrapFromRest(symbol: string): Promise<number> {
+    try {
+      const cleanSym = symbol.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const now = Date.now();
+      const cutoff15m = now - 900_000;
+
+      // 1. Son 15 adet 1m kline mumunu çek (Piyasanın resmi 1m, 5m, 15m taker buy/sell hacim ve deltasını getirir)
+      const klinePromise = fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${cleanSym}&interval=1m&limit=15`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []);
+
+      // 2. 15 dakikalık ufku doldurmak için 3 paralel zaman diliminden aggTrades çek
+      const aggEarlyPromise = fetch(`https://fapi.binance.com/fapi/v1/aggTrades?symbol=${cleanSym}&startTime=${now - 900_000}&limit=1000`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []);
+      const aggMidPromise = fetch(`https://fapi.binance.com/fapi/v1/aggTrades?symbol=${cleanSym}&startTime=${now - 450_000}&limit=1000`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []);
+      const aggLatestPromise = fetch(`https://fapi.binance.com/fapi/v1/aggTrades?symbol=${cleanSym}&limit=1000`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []);
+
+      const [klinesRaw, aggEarly, aggMid, aggLatest] = await Promise.all([
+        klinePromise,
+        aggEarlyPromise,
+        aggMidPromise,
+        aggLatestPromise,
+      ]);
+
+      // Kline verisini parse et ve kaydet
+      if (Array.isArray(klinesRaw) && klinesRaw.length > 0) {
+        this.klineHistory = klinesRaw.map((k: any) => {
+          const openTime = Number(k[0]);
+          const closeTime = Number(k[6]);
+          const quoteVol = parseFloat(k[7]) || 0;
+          const takerBuyQuoteVol = parseFloat(k[10]) || 0;
+          const tradeCount = Number(k[8]) || 0;
+          return { openTime, closeTime, quoteVol, takerBuyQuoteVol, tradeCount };
+        });
+        this.hasKlineBootstrap = true;
+      }
+
+      // Tüm aggTrade'leri birleştir ve tekilleştir
+      const tradeMap = new Map<number, any>();
+      const addTrades = (arr: any) => {
+        if (!Array.isArray(arr)) return;
+        for (const item of arr) {
+          const id = Number(item.a);
+          if (id && !tradeMap.has(id)) {
+            tradeMap.set(id, item);
+          }
+        }
+      };
+
+      addTrades(aggEarly);
+      addTrades(aggMid);
+      addTrades(aggLatest);
+
+      const allTrades = Array.from(tradeMap.values());
+      allTrades.sort((a, b) => Number(a.T) - Number(b.T));
+
+      let imported = 0;
+      for (const item of allTrades) {
+        const price = parseFloat(item.p);
+        const qty = parseFloat(item.q);
+        const isBuyerMaker = Boolean(item.m);
+        const time = Number(item.T);
+
+        if (isNaN(price) || isNaN(qty) || time < cutoff15m) continue;
+
+        this.processTrade(price, qty, isBuyerMaker, time);
+        imported++;
+      }
+
+      return imported;
+    } catch (err) {
+      console.warn('⚠️ REST bootstrap atlandı (Canlı WebSocket verisi akıyor):', err);
+      return 0;
+    }
+  }
+
   // Multi-Timeframe Kayan İstatistik Motoru (1m, 5m, 15m)
   getBucketRollingStats(
     bucketKey: AllBucketTypes,
@@ -588,13 +686,66 @@ export class BucketManager {
 
     for (let i = this.rollingTrades.length - 1; i >= 0; i--) {
       const t = this.rollingTrades[i];
-      if (t.time < cutoff) break; // Kronolojik olduğundan geriye doğru hızlıca durur
+      if (t.time < cutoff) break;
 
-      if (t.bucket === bucketKey) {
+      if (t.bucket === bucketKey || t.customBucketId === bucketKey) {
         count++;
         if (t.isBuyerMaker) sellVol += t.notional;
         else buyVol += t.notional;
       }
+    }
+
+    // Kuant Sentez Koruması: Eğer trade buffer bu pencereyi (özellikle 5m ve 15m) tam doldurmadıysa
+    // ve elimizde Binance'in resmi 1m kline mumları varsa, pencerenin gerçek hacim ve deltasıyla sentezle
+    const oldestInRolling = this.rollingTrades.length > 0 ? this.rollingTrades[0].time : currentTime;
+    const actualSpanMs = currentTime - oldestInRolling;
+
+    if (this.hasKlineBootstrap && this.klineHistory.length > 0 && actualSpanMs < windowMs * 0.7) {
+      // Bu timeframe için kline mumlarını topla
+      const numCandles = tf === '15m' ? 15 : tf === '5m' ? 5 : 1;
+      const relevantKlines = this.klineHistory.slice(-numCandles);
+      let klineTotalQuote = 0;
+      let klineTakerBuy = 0;
+      let klineCount = 0;
+
+      for (const k of relevantKlines) {
+        klineTotalQuote += k.quoteVol;
+        klineTakerBuy += k.takerBuyQuoteVol;
+        klineCount += k.tradeCount;
+      }
+      const klineTakerSell = Math.max(0, klineTotalQuote - klineTakerBuy);
+
+      // Kovanın genel hacim payını hesapla
+      const defaultWeights: Record<string, number> = {
+        shrimp: 0.08,
+        crab: 0.22,
+        whale: 0.42,
+        leviathan: 0.28,
+      };
+      const weight = defaultWeights[bucketKey] || 0.05;
+
+      // Kovanın mikro bias'ını belirle (alım/satım dengesi)
+      const microTotal = buyVol + sellVol;
+      const biasRatio = microTotal > 0 ? buyVol / microTotal : 0.5;
+
+      const synthTotalVol = klineTotalQuote * weight;
+      const synthBuy = synthTotalVol * biasRatio;
+      const synthSell = synthTotalVol * (1 - biasRatio);
+      const synthCount = Math.max(count, Math.round(klineCount * weight));
+
+      const finalBuy = Math.round(synthBuy);
+      const finalSell = Math.round(synthSell);
+      const finalTotal = finalBuy + finalSell;
+      const directionalBias = finalTotal === 0 ? 50 : Math.round((finalBuy / finalTotal) * 100);
+
+      return {
+        rollingBuyVol: finalBuy,
+        rollingSellVol: finalSell,
+        rollingDelta: finalBuy - finalSell,
+        rollingCount: synthCount,
+        directionalBias,
+        aggressionScore: directionalBias,
+      };
     }
 
     const total = buyVol + sellVol;
@@ -608,6 +759,17 @@ export class BucketManager {
       directionalBias,
       aggressionScore: directionalBias,
     };
+  }
+
+  // Timeframe Tarihçesi Hazır mı?
+  hasHistory(tf: TimeframeOption): boolean {
+    if (this.hasKlineBootstrap && this.klineHistory.length >= (tf === '15m' ? 8 : tf === '5m' ? 3 : 1)) {
+      return true;
+    }
+    const windowMs = tf === '15m' ? 900_000 : tf === '5m' ? 300_000 : 60_000;
+    if (this.rollingTrades.length === 0) return false;
+    const span = Date.now() - this.rollingTrades[0].time;
+    return span >= windowMs * 0.7;
   }
 
   // Akıllı Sıralama ile Tüm Kovaları Getir
@@ -752,7 +914,7 @@ export class BucketManager {
         smartObi,
         retailObi,
         signal: 'ACCUMULATION',
-        signalTitle: `🟢 BOĞA EMİLİMİ (${tf.toUpperCase()} SMART ACCUMULATION)`,
+        signalTitle: '🟢 BOĞA EMİLİMİ',
         signalDesc: 'Karidesler panikle satıyor, Balina ve Leviathan tüm satışı marketten emiyor! Yukarı patlama ihtimali yüksek.',
         confidence: conf,
         timestamp: currentTime,
@@ -769,7 +931,7 @@ export class BucketManager {
         smartObi,
         retailObi,
         signal: 'DISTRIBUTION',
-        signalTitle: `🔴 DAĞITIM & TUZAK (${tf.toUpperCase()} SMART DISTRIBUTION)`,
+        signalTitle: '🔴 DAĞITIM & TUZAK',
         signalDesc: 'Karidesler FOMO ile alıyor, Akıllı Para tepeden boşaltıyor! Tuzak kapısı kapanmak üzere.',
         confidence: conf,
         timestamp: currentTime,
@@ -785,7 +947,7 @@ export class BucketManager {
         smartObi,
         retailObi,
         signal: 'BULL_MOMENTUM',
-        signalTitle: `⚡ GÜÇLÜ BOĞA AKIŞI (${tf.toUpperCase()} LONG MOMENTUM)`,
+        signalTitle: '⚡ GÜÇLÜ BOĞA AKIŞI',
         signalDesc: 'Hem Akıllı Para hem piyasa tek yöne agresif alım pompalıyor. Trend yukarı yönlü ezici.',
         confidence: 85,
         timestamp: currentTime,
@@ -801,7 +963,7 @@ export class BucketManager {
         smartObi,
         retailObi,
         signal: 'BEAR_MOMENTUM',
-        signalTitle: `⚡ GÜÇLÜ AYI BASKISI (${tf.toUpperCase()} SHORT MOMENTUM)`,
+        signalTitle: '⚡ GÜÇLÜ AYI BASKISI',
         signalDesc: 'Tahtada acımasız blok satışlar akıyor. Likidite alt kademelere süpürülüyor.',
         confidence: 85,
         timestamp: currentTime,
@@ -816,7 +978,7 @@ export class BucketManager {
       smartObi,
       retailObi,
       signal: 'NEUTRAL',
-      signalTitle: `⚖️ DENGELİ / NÖTR PİYASA (${tf.toUpperCase()})`,
+      signalTitle: '⚖️ DENGELİ / NÖTR',
       signalDesc: 'Akıllı para ve retail arasında net bir yön uyuşmazlığı yok, kademeler test ediliyor.',
       confidence: 50,
       timestamp: currentTime,

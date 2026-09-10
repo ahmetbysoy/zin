@@ -9,7 +9,9 @@ import {
   Scale, 
   TrendingDown, 
   TrendingUp, 
-  Zap 
+  Zap,
+  Clock,
+  Activity
 } from 'lucide-react';
 import { BucketManager } from '../engine';
 import { TimeframeOption } from '../types';
@@ -19,6 +21,50 @@ interface StatsViewProps {
   activeSymbol: string;
 }
 
+// Standart Finansal Para Formatı: Asla "$-49.048" basmaz! Doğrusu: "-$49,048" ve "+$12,450"
+export const formatSignedUsd = (val: number): string => {
+  if (val === 0 || isNaN(val)) return '$0';
+  const isNeg = val < 0;
+  const abs = Math.round(Math.abs(val)).toLocaleString('en-US');
+  return `${isNeg ? '-$' : '+$'}${abs}`;
+};
+
+export const formatCompactSignedUsd = (val: number): string => {
+  if (val === 0 || isNaN(val)) return '$0';
+  const isNeg = val < 0;
+  const sign = isNeg ? '-$' : '+$';
+  const abs = Math.abs(val);
+  if (abs >= 1_000_000) {
+    const formatted = (abs / 1_000_000).toFixed(1).replace(/\.0$/, '');
+    return `${sign}${formatted}M`;
+  }
+  if (abs >= 1_000) {
+    const formatted = (abs / 1_000).toFixed(0);
+    return `${sign}${formatted}K`;
+  }
+  return `${sign}${Math.round(abs)}`;
+};
+
+export const formatUsd = (val: number): string => {
+  if (isNaN(val)) return '$0';
+  return `$${Math.round(Math.abs(val)).toLocaleString('en-US')}`;
+};
+
+const getSignalLabel = (signal: string): { label: string; short: string } => {
+  switch (signal) {
+    case 'ACCUMULATION':
+      return { label: 'Akıllı Para Toplama', short: 'Toplama' };
+    case 'DISTRIBUTION':
+      return { label: 'Akıllı Para Boşaltma', short: 'Boşaltma' };
+    case 'BULL_MOMENTUM':
+      return { label: 'Boğa Akışı', short: 'Boğa' };
+    case 'BEAR_MOMENTUM':
+      return { label: 'Ayı Akışı', short: 'Ayı' };
+    default:
+      return { label: 'Nötr Akış', short: 'Nötr' };
+  }
+};
+
 export const StatsView: React.FC<StatsViewProps> = ({
   bucketManager,
   activeSymbol,
@@ -27,8 +73,28 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const timeframes: TimeframeOption[] = ['1m', '5m', '15m'];
   const now = Date.now();
 
+  // Veri doluluk oranını hesapla (Pencere Isınma İlerlemesi)
+  const oldestTradeTime = bucketManager.rollingTrades.length > 0 
+    ? bucketManager.rollingTrades[0].time 
+    : now;
+  const availableHistoryMs = Math.max(0, now - oldestTradeTime);
+
+  const getWindowCoverage = (tf: TimeframeOption): { percent: number; isReady: boolean; text: string } => {
+    // REST Kline & AggTrade Bootstrap varsa doğrudan Canlı kabul et
+    if (bucketManager.hasHistory(tf)) {
+      return { percent: 100, isReady: true, text: 'Canlı' };
+    }
+    const targetMs = tf === '15m' ? 900_000 : tf === '5m' ? 300_000 : 60_000;
+    const ratio = Math.min(1, availableHistoryMs / targetMs);
+    const percent = Math.round(ratio * 100);
+    const isReady = percent >= 95;
+    const text = isReady ? 'Canlı' : `Isınıyor %${percent}`;
+    return { percent, isReady, text };
+  };
+
   const divergenceReports = timeframes.map((tf) => ({
     tf,
+    coverage: getWindowCoverage(tf),
     div: bucketManager.getSmartMoneyDivergence(tf, now),
   }));
 
@@ -52,7 +118,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
   const totalSmartDelta = totalSmartBuy - totalSmartSell;
   const totalRetailDelta = totalRetailBuy - totalRetailSell;
 
-  // Order Flow Imbalance (OBI) Hesaplaması: (Buy - Sell) / (Buy + Sell)
+  // Order Flow Imbalance (OBI): (Buy - Sell) / (Buy + Sell)
   const smartOBI = totalSmartVol > 0 ? Math.round((totalSmartDelta / totalSmartVol) * 100) : 0;
   const retailOBI = totalRetailVol > 0 ? Math.round((totalRetailDelta / totalRetailVol) * 100) : 0;
   const overallOBI = combinedVol > 0 ? Math.round(((totalSmartDelta + totalRetailDelta) / combinedVol) * 100) : 0;
@@ -117,43 +183,33 @@ export const StatsView: React.FC<StatsViewProps> = ({
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header & CSV Export */}
-      <div className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-rose-500" />
-            <h2 className="text-base font-black text-stone-900 dark:text-stone-100">
-              Multi-Timeframe Akıllı Para Matrisi ({activeSymbol || 'BTCUSDT'})
-            </h2>
-          </div>
-          <p className="text-xs text-stone-500 dark:text-stone-400 mt-1">
-            1m, 5m ve 15m pencerelerinde mikro-akış ayrışması ve Order Flow Imbalance (OBI)
-          </p>
+    <div className="space-y-2.5 sm:space-y-3">
+      {/* Minimal Üst Başlık & Parite Göstergesi */}
+      <div className="flex items-center justify-between px-1 py-0.5">
+        <div className="flex items-center gap-2">
+          <BarChart3 className="w-4 h-4 text-rose-500 shrink-0" />
+          <h2 className="text-xs sm:text-sm font-black tracking-tight text-stone-900 dark:text-stone-100">
+            Multi-Timeframe Akıllı Para Matrisi ({activeSymbol || 'BTCUSDT'})
+          </h2>
         </div>
-
-        <button
-          type="button"
-          onClick={handleExportCSV}
-          className="px-3.5 py-2 rounded-xl bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-stone-800 dark:hover:bg-stone-200 shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
-        >
-          <Download className="w-3.5 h-3.5 text-rose-400 dark:text-rose-600" />
-          <span>{exportNotice ? 'CSV İndirildi!' : 'Matrisi CSV İndir'}</span>
-        </button>
+        <span className="text-[10px] font-mono text-stone-400">
+          1m • 5m • 15m Mikro-Akış & OBI
+        </span>
       </div>
 
-      {/* Multi-Timeframe Comparison Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {divergenceReports.map(({ tf, div }) => {
+      {/* Multi-Timeframe Minimalist Kartlar (3'lü Yan Yana, Sıfır Kaydırma) */}
+      <div className="grid grid-cols-3 gap-1.5 sm:gap-3">
+        {divergenceReports.map(({ tf, coverage, div }) => {
           const isAcc = div.signal === 'ACCUMULATION';
           const isDist = div.signal === 'DISTRIBUTION';
           const isBull = div.signal === 'BULL_MOMENTUM';
           const isBear = div.signal === 'BEAR_MOMENTUM';
+          const sig = getSignalLabel(div.signal);
 
           return (
             <div
               key={tf}
-              className={`p-4 rounded-2xl border transition-all shadow-xs ${
+              className={`p-2 sm:p-3 rounded-xl border transition-all shadow-2xs flex flex-col justify-between ${
                 isAcc
                   ? 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800'
                   : isDist
@@ -165,58 +221,109 @@ export const StatsView: React.FC<StatsViewProps> = ({
                   : 'bg-white/95 dark:bg-stone-900 border-pink-200/80 dark:border-stone-800'
               }`}
             >
-              <div className="flex items-center justify-between border-b border-stone-200/60 dark:border-stone-800 pb-2.5 mb-2.5">
-                <span className="font-mono text-sm font-black px-2.5 py-0.5 rounded-md bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900">
-                  {tf.toUpperCase()} PENCERE
-                </span>
-                <span className="text-xs font-mono font-bold text-stone-600 dark:text-stone-300">
-                  Güven: %{div.confidence}
+              {/* Başlık & Durum */}
+              <div className="flex items-center justify-between gap-1 pb-1.5 border-b border-stone-200/60 dark:border-stone-800/80">
+                <div className="flex items-center gap-1">
+                  <span className="font-mono text-[11px] sm:text-xs font-black px-1.5 py-0.5 rounded bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900">
+                    {tf.toUpperCase()}
+                  </span>
+                  <span
+                    className={`text-[9px] font-mono px-1 py-0.2 rounded font-bold ${
+                      coverage.isReady
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
+                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300'
+                    }`}
+                  >
+                    {coverage.isReady ? 'Canlı' : `%${coverage.percent}`}
+                  </span>
+                </div>
+                <span className="text-[10px] font-mono font-bold text-stone-500 dark:text-stone-400">
+                  %{div.confidence}
                 </span>
               </div>
 
-              <div className="space-y-2">
-                <div className="font-black text-sm text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-                  {isAcc || isBull ? <TrendingUp className="w-4 h-4 text-emerald-600" /> : <TrendingDown className="w-4 h-4 text-rose-600" />}
-                  <span>{div.signal}</span>
-                </div>
+              {/* Sinyal Rozeti */}
+              <div className="py-1.5 flex items-center gap-1 font-black text-[11px] sm:text-xs truncate text-stone-900 dark:text-stone-100">
+                {isAcc || isBull ? (
+                  <TrendingUp className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : (
+                  <TrendingDown className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                )}
+                <span className="truncate sm:hidden">{sig.short}</span>
+                <span className="truncate hidden sm:inline">{sig.label}</span>
+              </div>
 
-                <div className="space-y-1 font-mono text-xs pt-1">
-                  <div className="flex justify-between">
-                    <span className="text-stone-500 dark:text-stone-400">Retail Delta:</span>
-                    <span className={`font-bold ${div.retailDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {div.retailDelta >= 0 ? '+' : ''}${Math.round(div.retailDelta).toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-stone-500 dark:text-stone-400">Smart Delta:</span>
-                    <span className={`font-bold ${div.smartDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {div.smartDelta >= 0 ? '+' : ''}${Math.round(div.smartDelta).toLocaleString()}
-                    </span>
-                  </div>
+              {/* Delta Satırları (Sıkışık & Okunabilir) */}
+              <div className="pt-1 border-t border-stone-200/60 dark:border-stone-800/80 font-mono text-[10px] sm:text-xs space-y-0.5">
+                <div
+                  className="flex justify-between items-center"
+                  title={`Smart Delta: ${formatSignedUsd(div.smartDelta)}`}
+                >
+                  <span className="text-stone-500 dark:text-stone-400">Smart:</span>
+                  <span
+                    className={`font-bold text-right ${
+                      div.smartDelta >= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    {formatCompactSignedUsd(div.smartDelta)}
+                  </span>
                 </div>
-
-                <p className="text-[11px] text-stone-600 dark:text-stone-300 pt-1 leading-relaxed border-t border-stone-200/60 dark:border-stone-800">
-                  {div.signalDesc}
-                </p>
+                <div
+                  className="flex justify-between items-center"
+                  title={`Retail Delta: ${formatSignedUsd(div.retailDelta)}`}
+                >
+                  <span className="text-stone-500 dark:text-stone-400">Retail:</span>
+                  <span
+                    className={`font-bold text-right ${
+                      div.retailDelta >= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    {formatCompactSignedUsd(div.retailDelta)}
+                  </span>
+                </div>
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* OBI (Order Flow Imbalance) & Dominance Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      {/* OBI (Order Flow Imbalance) Bipolar Gauges */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 sm:gap-3">
         {/* Smart Money OBI */}
-        <div className="p-4 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Smart Money OBI</span>
             <span className={`text-xs font-mono font-black ${smartOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
               {smartOBI >= 0 ? '+' : ''}{smartOBI}%
             </span>
           </div>
-          <div className="w-full h-2 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
-            <div className="bg-emerald-500 h-full" style={{ width: `${Math.max(0, (smartOBI + 100) / 2)}%` }} />
-            <div className="bg-rose-500 h-full" style={{ width: `${Math.max(0, (100 - smartOBI) / 2)}%` }} />
+          {/* Bipolar Gauge */}
+          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
+            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
+            <div className="w-1/2 h-full flex justify-end">
+              {smartOBI < 0 && (
+                <div
+                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
+                  style={{ width: `${Math.min(100, Math.abs(smartOBI))}%` }}
+                />
+              )}
+            </div>
+            <div className="w-1/2 h-full flex justify-start">
+              {smartOBI > 0 && (
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
+                  style={{ width: `${Math.min(100, smartOBI)}%` }}
+                />
+              )}
+            </div>
+          </div>
+          <div className="flex justify-between text-[10px] font-mono text-stone-400">
+            <span>Satıcı Baskısı</span>
+            <span>Alıcı Baskısı</span>
           </div>
           <p className="text-[10px] text-stone-500 font-mono">
             Balina & Leviathan net emir dengesizliği (5m)
@@ -224,16 +331,36 @@ export const StatsView: React.FC<StatsViewProps> = ({
         </div>
 
         {/* Retail OBI */}
-        <div className="p-4 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Retail OBI</span>
             <span className={`text-xs font-mono font-black ${retailOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
               {retailOBI >= 0 ? '+' : ''}{retailOBI}%
             </span>
           </div>
-          <div className="w-full h-2 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
-            <div className="bg-emerald-500 h-full" style={{ width: `${Math.max(0, (retailOBI + 100) / 2)}%` }} />
-            <div className="bg-rose-500 h-full" style={{ width: `${Math.max(0, (100 - retailOBI) / 2)}%` }} />
+          {/* Bipolar Gauge */}
+          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
+            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
+            <div className="w-1/2 h-full flex justify-end">
+              {retailOBI < 0 && (
+                <div
+                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
+                  style={{ width: `${Math.min(100, Math.abs(retailOBI))}%` }}
+                />
+              )}
+            </div>
+            <div className="w-1/2 h-full flex justify-start">
+              {retailOBI > 0 && (
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
+                  style={{ width: `${Math.min(100, retailOBI)}%` }}
+                />
+              )}
+            </div>
+          </div>
+          <div className="flex justify-between text-[10px] font-mono text-stone-400">
+            <span>Satıcı Baskısı</span>
+            <span>Alıcı Baskısı</span>
           </div>
           <p className="text-[10px] text-stone-500 font-mono">
             Karides ve küçük yatırımcı net emir dengesizliği (5m)
@@ -241,16 +368,36 @@ export const StatsView: React.FC<StatsViewProps> = ({
         </div>
 
         {/* Overall Market Imbalance */}
-        <div className="p-4 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Toplam Piyasa İmbilansı</span>
+            <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Piyasa Emir Dengesizliği (Imbalance)</span>
             <span className={`text-xs font-mono font-black ${overallOBI >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
               {overallOBI >= 0 ? '+' : ''}{overallOBI}%
             </span>
           </div>
-          <div className="w-full h-2 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
-            <div className="bg-emerald-500 h-full" style={{ width: `${Math.max(0, (overallOBI + 100) / 2)}%` }} />
-            <div className="bg-rose-500 h-full" style={{ width: `${Math.max(0, (100 - overallOBI) / 2)}%` }} />
+          {/* Bipolar Gauge */}
+          <div className="relative w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex items-center">
+            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-stone-400/80 dark:bg-stone-500 z-10" />
+            <div className="w-1/2 h-full flex justify-end">
+              {overallOBI < 0 && (
+                <div
+                  className="h-full bg-rose-500 transition-all duration-300 rounded-l-xs"
+                  style={{ width: `${Math.min(100, Math.abs(overallOBI))}%` }}
+                />
+              )}
+            </div>
+            <div className="w-1/2 h-full flex justify-start">
+              {overallOBI > 0 && (
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-300 rounded-r-xs"
+                  style={{ width: `${Math.min(100, overallOBI)}%` }}
+                />
+              )}
+            </div>
+          </div>
+          <div className="flex justify-between text-[10px] font-mono text-stone-400">
+            <span>Satıcı Baskısı</span>
+            <span>Alıcı Baskısı</span>
           </div>
           <p className="text-[10px] text-stone-500 font-mono">
             Tahtadaki tüm hacim üzerinde alıcı / satıcı net baskısı
@@ -259,12 +406,12 @@ export const StatsView: React.FC<StatsViewProps> = ({
       </div>
 
       {/* Dominance Ratio & Net Delta Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 sm:gap-3">
         {/* Smart Money vs Retail Hacim Oranı */}
-        <div className="p-4 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-3">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
           <div className="flex items-center gap-2">
             <Scale className="w-4 h-4 text-rose-500" />
-            <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
+            <h3 className="text-xs sm:text-sm font-bold text-stone-900 dark:text-stone-100">
               Hacim Hakimiyeti (Smart vs Retail)
             </h3>
           </div>
@@ -275,7 +422,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
               <span className="text-stone-500 dark:text-stone-400">Retail: %{retailRatio}</span>
             </div>
 
-            <div className="w-full h-3 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
+            <div className="w-full h-2.5 bg-stone-100 dark:bg-stone-800 rounded-full overflow-hidden flex">
               <div
                 className="bg-amber-500 h-full transition-all duration-300"
                 style={{ width: `${smartRatio}%` }}
@@ -286,38 +433,38 @@ export const StatsView: React.FC<StatsViewProps> = ({
               />
             </div>
 
-            <div className="flex justify-between text-[10px] font-mono text-stone-400 pt-1">
-              <span>Toplam Smart: ${Math.round(totalSmartVol).toLocaleString()}</span>
-              <span>Toplam Retail: ${Math.round(totalRetailVol).toLocaleString()}</span>
+            <div className="flex justify-between text-[10px] font-mono text-stone-400 pt-0.5">
+              <span>Toplam Smart: {formatUsd(totalSmartVol)}</span>
+              <span>Toplam Retail: {formatUsd(totalRetailVol)}</span>
             </div>
           </div>
         </div>
 
         {/* Net Delta Dengesi */}
-        <div className="p-4 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-3">
+        <div className="p-3 sm:p-3.5 bg-white/95 dark:bg-stone-900 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
           <div className="flex items-center gap-2">
             <GitCompare className="w-4 h-4 text-rose-500" />
-            <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
+            <h3 className="text-xs sm:text-sm font-bold text-stone-900 dark:text-stone-100">
               Kümülatif Net Delta Karşılaştırması
             </h3>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-1 font-mono">
-            <div className="p-3 bg-amber-50/70 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800">
+          <div className="grid grid-cols-2 gap-2 pt-0.5 font-mono">
+            <div className="p-2.5 bg-amber-50/70 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800">
               <div className="text-[10px] uppercase font-sans text-amber-800 dark:text-amber-300 font-bold">
                 Smart Money Net Delta
               </div>
-              <div className={`text-base font-black mt-1 ${totalSmartDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {totalSmartDelta >= 0 ? '+' : ''}${Math.round(totalSmartDelta).toLocaleString()}
+              <div className={`text-sm sm:text-base font-black mt-0.5 ${totalSmartDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {formatSignedUsd(totalSmartDelta)}
               </div>
             </div>
 
-            <div className="p-3 bg-stone-50 dark:bg-stone-800/80 rounded-xl border border-stone-200 dark:border-stone-700">
+            <div className="p-2.5 bg-stone-50 dark:bg-stone-800/80 rounded-xl border border-stone-200 dark:border-stone-700">
               <div className="text-[10px] uppercase font-sans text-stone-600 dark:text-stone-400 font-bold">
                 Retail Net Delta
               </div>
-              <div className={`text-base font-black mt-1 ${totalRetailDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                {totalRetailDelta >= 0 ? '+' : ''}${Math.round(totalRetailDelta).toLocaleString()}
+              <div className={`text-sm sm:text-base font-black mt-0.5 ${totalRetailDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                {formatSignedUsd(totalRetailDelta)}
               </div>
             </div>
           </div>
@@ -325,24 +472,41 @@ export const StatsView: React.FC<StatsViewProps> = ({
       </div>
 
       {/* Multi-Timeframe Kova Matrisi Tablosu */}
-      <div className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-3">
-        <div className="flex items-center gap-2">
-          <Layers className="w-4 h-4 text-rose-500" />
-          <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
-            Kova Bazında Multi-Timeframe Delta & Hacim Matrisi
-          </h3>
+      <div className="bg-white/95 dark:bg-stone-900 p-3.5 sm:p-4 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-2.5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-rose-500 shrink-0" />
+            <h3 className="text-xs sm:text-sm font-bold text-stone-900 dark:text-stone-100">
+              Kova Bazında Multi-Timeframe Delta & Hacim Matrisi
+            </h3>
+          </div>
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <span className="text-[10px] font-mono text-stone-500 dark:text-stone-400 bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded-md">
+              {allBuckets5m.length} Aktif Kova
+            </span>
+            <button
+              type="button"
+              onClick={handleExportCSV}
+              className="px-2.5 py-1 rounded-lg bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 text-[11px] font-bold flex items-center gap-1.5 hover:bg-stone-800 dark:hover:bg-stone-200 transition-colors cursor-pointer shadow-2xs"
+            >
+              <Download className="w-3 h-3 text-rose-400 dark:text-rose-600" />
+              <span>{exportNotice ? 'İndirildi!' : 'CSV İndir'}</span>
+            </button>
+          </div>
         </div>
 
-        <div className="overflow-x-auto max-h-[360px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl">
-          <table className="w-full text-left text-xs font-mono">
-            <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-10">
+        {/* Mobil Uyumlu Yatay Kaydırma Zırhı - Sticky Freeze İlk Sütun */}
+        <div className="overflow-x-auto max-h-[420px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl relative">
+          <table className="w-full min-w-[590px] text-left text-xs font-mono border-collapse">
+            <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-30">
               <tr>
-                <th className="p-2.5">Kova Adı</th>
-                <th className="p-2.5">Tür</th>
-                <th className="p-2.5">1m Delta</th>
-                <th className="p-2.5">5m Delta</th>
-                <th className="p-2.5">15m Delta</th>
-                <th className="p-2.5 text-right">5m Hacim</th>
+                <th className="p-2.5 whitespace-nowrap sticky left-0 bg-stone-100 dark:bg-stone-800 z-40 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
+                  Kova Adı & Tür
+                </th>
+                <th className="p-2.5 whitespace-nowrap text-right min-w-[105px]">1m Delta</th>
+                <th className="p-2.5 whitespace-nowrap text-right min-w-[110px]">5m Delta</th>
+                <th className="p-2.5 whitespace-nowrap text-right min-w-[115px]">15m Delta</th>
+                <th className="p-2.5 whitespace-nowrap text-right min-w-[100px]">5m Hacim</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
@@ -355,31 +519,33 @@ export const StatsView: React.FC<StatsViewProps> = ({
                 const vol5 = (b5.rollingBuyVol ?? 0) + (b5.rollingSellVol ?? 0);
 
                 return (
-                  <tr key={b5.id} className="hover:bg-rose-50/40 dark:hover:bg-stone-800/40 transition-colors">
-                    <td className="p-2.5 font-bold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-                      <span>{b5.icon}</span>
-                      <span>{b5.name}</span>
+                  <tr key={b5.id} className="hover:bg-rose-50/40 dark:hover:bg-stone-800/40 transition-colors group">
+                    <td className="p-2.5 whitespace-nowrap sticky left-0 bg-white dark:bg-stone-900 group-hover:bg-rose-50/70 dark:group-hover:bg-stone-800/80 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.12)] min-w-[160px]">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg shrink-0">{b5.icon}</span>
+                        <div className="flex flex-col">
+                          <span className="font-bold text-stone-900 dark:text-stone-100">{b5.name}</span>
+                          <span className={`inline-block w-fit px-1.5 py-0.2 rounded text-[9px] font-bold mt-0.5 ${
+                            b5.isSmartMoney
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                              : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
+                          }`}>
+                            {b5.isSmartMoney ? 'Smart Money' : 'Retail'}
+                          </span>
+                        </div>
+                      </div>
                     </td>
-                    <td className="p-2.5">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        b5.isSmartMoney
-                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                          : 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400'
-                      }`}>
-                        {b5.isSmartMoney ? 'Smart' : 'Retail'}
-                      </span>
+                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[105px] ${d1 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {formatSignedUsd(d1)}
                     </td>
-                    <td className={`p-2.5 font-bold ${d1 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {d1 >= 0 ? '+' : ''}${Math.round(d1).toLocaleString()}
+                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[110px] ${d5 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {formatSignedUsd(d5)}
                     </td>
-                    <td className={`p-2.5 font-bold ${d5 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {d5 >= 0 ? '+' : ''}${Math.round(d5).toLocaleString()}
+                    <td className={`p-2.5 font-bold text-right whitespace-nowrap min-w-[115px] ${d15 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {formatSignedUsd(d15)}
                     </td>
-                    <td className={`p-2.5 font-bold ${d15 >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {d15 >= 0 ? '+' : ''}${Math.round(d15).toLocaleString()}
-                    </td>
-                    <td className="p-2.5 text-right font-medium text-stone-600 dark:text-stone-400">
-                      ${Math.round(vol5).toLocaleString()}
+                    <td className="p-2.5 text-right font-medium text-stone-600 dark:text-stone-400 whitespace-nowrap min-w-[100px]">
+                      {formatUsd(vol5)}
                     </td>
                   </tr>
                 );

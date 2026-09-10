@@ -520,7 +520,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
             <button
               type="button"
               onClick={handleAutoExpand}
@@ -579,7 +579,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
 
-            <div className="flex items-end">
+            <div className="flex items-end col-span-2 sm:col-span-1">
               <button
                 type="submit"
                 className="w-full py-1.5 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold flex items-center justify-center gap-1 shadow-xs transition-colors cursor-pointer"
@@ -630,7 +630,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {/* Mevcut Özel Kovalar Tablosu */}
         <div className="overflow-x-auto max-h-[400px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl">
-          <table className="w-full text-left text-xs font-mono">
+          <table className="w-full text-left text-xs font-mono min-w-[620px]">
             <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-10">
               <tr>
                 <th className="p-2.5">İkon & Ad</th>
