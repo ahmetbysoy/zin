@@ -1,24 +1,23 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
-import { 
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import {
   AlertTriangle,
-  Check, 
-  Copy, 
-  Cpu, 
-  Download, 
-  Eye, 
-  EyeOff, 
-  Layers,
-  Moon, 
-  Plus, 
-  RotateCcw, 
-  Sliders, 
-  Sun, 
-  Trash2, 
-  Upload, 
-  Volume2, 
-  VolumeX, 
+  Check,
+  Copy,
+  Cpu,
+  Download,
+  Eye,
+  EyeOff,
+  Moon,
+  Plus,
+  RotateCcw,
+  Sliders,
+  Sun,
+  Trash2,
+  Upload,
+  Volume2,
+  VolumeX,
   X,
-  Zap 
+  Zap,
 } from 'lucide-react';
 import { soundEngine } from '../audio';
 import { BucketManager } from '../engine';
@@ -32,333 +31,226 @@ interface SettingsViewProps {
   onRefreshCustomBuckets: () => void;
 }
 
-// ------------------------------------------------------------------------
-// 📊 BUCKET DAĞILIM & SPEKTRUM ÖNİZLEMESİ (GÖRSEL LOGARİTMİK ÇUBUK)
-// ------------------------------------------------------------------------
-const BucketDistributionPreview: React.FC<{
-  buckets: CustomBucket[];
-  proposedMin?: number;
-  proposedMax?: number;
-  proposedSmart?: boolean;
-}> = memo(({ buckets, proposedMin, proposedMax, proposedSmart }) => {
-  const activeBuckets = useMemo(() => {
-    return [...buckets]
-      .filter((b) => b.isActive)
-      .sort((a, b) => a.minValue - b.minValue);
-  }, [buckets]);
+// Emoji-safe kırpma: maxLength karakter değil "grapheme" sayar (surrogate pair bozulmasını önler)
+const clampIcon = (raw: string, maxChars = 2): string => {
+  const chars = Array.from(raw.trim());
+  return chars.length ? chars.slice(0, maxChars).join('') : '💎';
+};
 
-  if (activeBuckets.length === 0 && (proposedMin === undefined || proposedMax === undefined)) {
-    return null;
+const clipboardCopy = async (text: string): Promise<boolean> => {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    throw new Error('clipboard api yok');
+  } catch {
+    // iframe/sandbox fallback
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
   }
-
-  const minUsdt = 1;
-  const maxUsdt = Math.max(
-    100_000,
-    ...activeBuckets.map((b) => b.maxValue),
-    proposedMax || 0
-  );
-
-  const getLogPos = (val: number) => {
-    const safeVal = Math.max(minUsdt, val);
-    const logMin = Math.log10(minUsdt);
-    const logMax = Math.log10(maxUsdt);
-    const ratio = (Math.log10(safeVal) - logMin) / (logMax - logMin);
-    return Math.min(100, Math.max(0, ratio * 100));
-  };
-
-  return (
-    <div className="p-3 bg-stone-50 dark:bg-stone-800/80 rounded-xl border border-stone-200 dark:border-stone-700 space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Layers className="w-3.5 h-3.5 text-rose-500" />
-          <span className="text-[11px] font-bold text-stone-800 dark:text-stone-200">
-            Kova Spektrum & Dağılım Önizlemesi (Logaritmik $1 - ${Math.round(maxUsdt / 1000)}k)
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-[10px] font-mono">
-          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400 font-bold">
-            <span className="w-2 h-2 rounded-full bg-amber-500" /> Smart Money
-          </span>
-          <span className="flex items-center gap-1 text-stone-500 dark:text-stone-400">
-            <span className="w-2 h-2 rounded-full bg-stone-400" /> Retail
-          </span>
-        </div>
-      </div>
-
-      {/* Spektrum Çubuğu */}
-      <div className="relative w-full h-5 bg-stone-200 dark:bg-stone-900 rounded-lg overflow-hidden border border-stone-300 dark:border-stone-700">
-        {activeBuckets.map((b) => {
-          const left = getLogPos(b.minValue);
-          const right = getLogPos(b.maxValue);
-          const width = Math.max(0.5, right - left);
-
-          return (
-            <div
-              key={b.id}
-              style={{
-                left: `${left}%`,
-                width: `${width}%`,
-                backgroundColor: b.color || (b.isSmartMoney ? '#F59E0B' : '#A8A29E'),
-              }}
-              title={`${b.icon} ${b.name}: $${b.minValue.toLocaleString()} - $${b.maxValue.toLocaleString()} (${b.isSmartMoney ? 'Smart' : 'Retail'})`}
-              className="absolute top-0 bottom-0 opacity-80 hover:opacity-100 hover:brightness-110 transition-opacity cursor-pointer border-r border-black/20"
-            />
-          );
-        })}
-
-        {/* Yeni eklenecek kovanın önizleme şeridi */}
-        {proposedMin !== undefined && proposedMax !== undefined && proposedMax > proposedMin && (
-          <div
-            style={{
-              left: `${getLogPos(proposedMin)}%`,
-              width: `${Math.max(1, getLogPos(proposedMax) - getLogPos(proposedMin))}%`,
-            }}
-            className={`absolute top-0 bottom-0 border-2 border-dashed ${
-              proposedSmart ? 'border-amber-400 bg-amber-500/40' : 'border-rose-400 bg-rose-500/40'
-            } animate-pulse z-10 pointer-events-none`}
-            title={`Taslak: $${proposedMin} - $${proposedMax}`}
-          />
-        )}
-      </div>
-
-      {/* Eksen Etiketleri */}
-      <div className="flex justify-between text-[9px] font-mono text-stone-400">
-        <span>$1</span>
-        <span>$100</span>
-        <span>$1K</span>
-        <span>$10K</span>
-        <span>$100K+</span>
-      </div>
-    </div>
-  );
-});
+};
 
 // ------------------------------------------------------------------------
-// 🧩 YEREL STATE & DIRTY KORUMALI SATIR BİLEŞENİ (KLAVYE FOCUS KAYBINI ÖNLER)
+// 🧩 KOVA KARTI (mobil-öncelikli, klavye focus kaybı yok, Escape ile iptal)
 // ------------------------------------------------------------------------
 interface EditableBucketRowProps {
   bucket: CustomBucket;
   isDeleting: boolean;
+  isOverlap: boolean;
   onStartDelete: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onToggleActive: () => void;
   onToggleSmart: () => void;
   onSaveUpdate: (updates: Partial<CustomBucket>) => void;
-  isOverlap?: boolean;
 }
 
-const EditableBucketRow: React.FC<EditableBucketRowProps> = memo(({
+const EditableBucketRow: React.FC<EditableBucketRowProps> = ({
   bucket,
   isDeleting,
+  isOverlap,
   onStartDelete,
   onCancelDelete,
   onConfirmDelete,
   onToggleActive,
   onToggleSmart,
   onSaveUpdate,
-  isOverlap = false,
 }) => {
   const [localName, setLocalName] = useState(bucket.name);
   const [localMin, setLocalMin] = useState(bucket.minValue.toString());
   const [localMax, setLocalMax] = useState(bucket.maxValue.toString());
   const [localIcon, setLocalIcon] = useState(bucket.icon);
   const [localColor, setLocalColor] = useState(bucket.color);
-  const [isDirty, setIsDirty] = useState(false);
 
-  // Sadece kullanıcı düzenleme yapmıyorken (dirty=false) dışarıdan gelen güncellemeyi al
   useEffect(() => {
-    if (isDirty) return;
     setLocalName(bucket.name);
     setLocalMin(bucket.minValue.toString());
     setLocalMax(bucket.maxValue.toString());
     setLocalIcon(bucket.icon);
     setLocalColor(bucket.color);
-  }, [bucket.name, bucket.minValue, bucket.maxValue, bucket.icon, bucket.color, isDirty]);
+  }, [bucket.name, bucket.minValue, bucket.maxValue, bucket.icon, bucket.color]);
 
-  const commitChanges = useCallback(() => {
-    const trimmedName = localName.trim();
-    const minVal = parseFloat(localMin);
-    const maxVal = parseFloat(localMax);
-    const trimmedIcon = localIcon.trim() || '💎';
+  const commitName = () => {
+    const trimmed = localName.trim();
+    if (!trimmed) { setLocalName(bucket.name); return; }
+    if (trimmed !== bucket.name) onSaveUpdate({ name: trimmed });
+  };
 
-    // Geçersiz değerlerde eski orijinal kova değerlerine geri dön
-    if (!trimmedName) {
-      setLocalName(bucket.name);
-    }
-    if (isNaN(minVal) || isNaN(maxVal) || minVal < 0 || maxVal <= minVal) {
-      setLocalMin(bucket.minValue.toString());
-      setLocalMax(bucket.maxValue.toString());
-      setIsDirty(false);
-      return;
-    }
+  const commitMin = () => {
+    const val = parseFloat(localMin);
+    const maxRef = parseFloat(localMax); // stale prop yerine ekrandaki güncel max ile kıyasla
+    if (isNaN(val) || val < 0 || val >= maxRef) { setLocalMin(bucket.minValue.toString()); return; }
+    if (val !== bucket.minValue) onSaveUpdate({ minValue: Math.round(val) });
+  };
 
-    const updates: Partial<CustomBucket> = {};
-    if (trimmedName && trimmedName !== bucket.name) updates.name = trimmedName;
-    if (!isNaN(minVal) && Math.round(minVal) !== bucket.minValue) updates.minValue = Math.round(minVal);
-    if (!isNaN(maxVal) && Math.round(maxVal) !== bucket.maxValue) updates.maxValue = Math.round(maxVal);
-    if (trimmedIcon !== bucket.icon) updates.icon = trimmedIcon;
-    if (localColor !== bucket.color) updates.color = localColor;
+  const commitMax = () => {
+    const val = parseFloat(localMax);
+    const minRef = parseFloat(localMin);
+    if (isNaN(val) || val <= minRef) { setLocalMax(bucket.maxValue.toString()); return; }
+    if (val !== bucket.maxValue) onSaveUpdate({ maxValue: Math.round(val) });
+  };
 
-    if (Object.keys(updates).length > 0) {
-      onSaveUpdate(updates);
-    }
-    setIsDirty(false);
-  }, [localName, localMin, localMax, localIcon, localColor, bucket, onSaveUpdate]);
+  const commitIcon = () => {
+    const clamped = clampIcon(localIcon);
+    setLocalIcon(clamped);
+    if (clamped !== bucket.icon) onSaveUpdate({ icon: clamped });
+  };
+
+  const onEscape = (e: React.KeyboardEvent<HTMLInputElement>, reset: () => void) => {
+    if (e.key === 'Escape') { reset(); e.currentTarget.blur(); }
+    if (e.key === 'Enter') e.currentTarget.blur();
+  };
 
   return (
-    <tr className={`transition-colors ${isOverlap ? 'bg-amber-500/10' : 'hover:bg-rose-50/40 dark:hover:bg-stone-800/40'}`}>
-      {/* İkon & Kova Adı */}
-      <td className="p-2.5">
-        <div className="flex items-center gap-1.5 text-stone-900 dark:text-stone-100 font-bold">
-          <input
-            type="text"
-            value={localIcon}
-            maxLength={8}
-            onChange={(e) => {
-              setLocalIcon(e.target.value);
-              setIsDirty(true);
-            }}
-            onBlur={commitChanges}
-            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-            className="w-8 px-1 py-0.5 text-center bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded text-xs"
-            title="İkonu Değiştir"
-          />
-          <input
-            type="text"
-            value={localName}
-            onChange={(e) => {
-              setLocalName(e.target.value);
-              setIsDirty(true);
-            }}
-            onBlur={commitChanges}
-            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-            className="bg-transparent border-b border-dashed border-stone-300 dark:border-stone-700 px-1 py-0.5 text-xs font-bold w-32 sm:w-36 focus:border-rose-500 focus:outline-hidden"
-            title="İsmi Değiştir (Enter veya dışarı tıkla)"
-          />
-          {isOverlap && (
-            <span title="Aralık Çakışması Algılandı" className="text-amber-500 shrink-0">
-              <AlertTriangle className="w-3.5 h-3.5" />
-            </span>
-          )}
-        </div>
-      </td>
-
-      {/* Min USDT */}
-      <td className="p-2.5">
+    <div
+      className={`rounded-2xl border p-3.5 space-y-3 transition-colors ${
+        isOverlap
+          ? 'border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/20'
+          : 'border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900'
+      }`}
+    >
+      {/* Üst satır: ikon + isim + durum rozeti */}
+      <div className="flex items-center gap-2">
         <input
-          type="number"
-          value={localMin}
-          onChange={(e) => {
-            setLocalMin(e.target.value);
-            setIsDirty(true);
-          }}
-          onBlur={commitChanges}
-          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-          className="w-20 sm:w-24 px-1.5 py-0.5 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded text-xs font-mono tabular-nums focus:border-rose-500 focus:outline-hidden"
-          title="Minimum USDT tutarı"
+          type="text"
+          value={localIcon}
+          aria-label="Kova ikonu"
+          onChange={(e) => setLocalIcon(e.target.value)}
+          onBlur={commitIcon}
+          onKeyDown={(e) => onEscape(e, () => setLocalIcon(bucket.icon))}
+          className="w-11 h-11 shrink-0 grid place-items-center text-lg text-center bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-xl focus:border-rose-500 focus:outline-hidden"
         />
-      </td>
-
-      {/* Max USDT */}
-      <td className="p-2.5">
         <input
-          type="number"
-          value={localMax}
-          onChange={(e) => {
-            setLocalMax(e.target.value);
-            setIsDirty(true);
-          }}
-          onBlur={commitChanges}
-          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-          className="w-20 sm:w-24 px-1.5 py-0.5 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded text-xs font-mono tabular-nums focus:border-rose-500 focus:outline-hidden"
-          title="Maksimum USDT tutarı"
+          type="text"
+          value={localName}
+          aria-label="Kova adı"
+          onChange={(e) => setLocalName(e.target.value)}
+          onBlur={commitName}
+          onKeyDown={(e) => onEscape(e, () => setLocalName(bucket.name))}
+          className="min-w-0 flex-1 bg-transparent border-b border-dashed border-stone-300 dark:border-stone-700 px-1 py-1.5 text-sm font-bold text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
         />
-      </td>
-
-      {/* Renk */}
-      <td className="p-2.5">
-        <input
-          type="color"
-          value={localColor}
-          onChange={(e) => {
-            setLocalColor(e.target.value);
-            setIsDirty(true);
-          }}
-          onBlur={commitChanges}
-          className="w-6 h-6 p-0 rounded border-0 cursor-pointer"
-          title="Renk Seçin"
-        />
-      </td>
-
-      {/* Tür: Smart vs Retail */}
-      <td className="p-2.5">
-        <button
-          type="button"
-          onClick={onToggleSmart}
-          className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
-            bucket.isSmartMoney
-              ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
-              : 'bg-stone-100 dark:bg-stone-800 text-stone-500 border-stone-200 dark:border-stone-700'
-          }`}
-        >
-          {bucket.isSmartMoney ? 'Smart' : 'Retail'}
-        </button>
-      </td>
-
-      {/* Durum: Aktif vs Gizli */}
-      <td className="p-2.5">
+        {isOverlap && (
+          <span title="Aralık çakışması algılandı" className="shrink-0 text-amber-500">
+            <AlertTriangle className="w-4 h-4" />
+          </span>
+        )}
         <button
           type="button"
           onClick={onToggleActive}
-          className="flex items-center gap-1 text-xs text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200 cursor-pointer"
+          aria-label={bucket.isActive ? 'Kovayı gizle' : 'Kovayı aktifleştir'}
+          className="shrink-0 p-1.5 -m-1.5 rounded-lg text-stone-500 hover:text-stone-800 dark:hover:text-stone-200 cursor-pointer"
         >
-          {bucket.isActive ? (
-            <Eye className="w-3.5 h-3.5 text-emerald-500" />
-          ) : (
-            <EyeOff className="w-3.5 h-3.5 text-stone-400" />
-          )}
-          <span>{bucket.isActive ? 'Aktif' : 'Gizli'}</span>
+          {bucket.isActive ? <Eye className="w-4 h-4 text-emerald-500" /> : <EyeOff className="w-4 h-4 text-stone-400" />}
         </button>
-      </td>
+      </div>
 
-      {/* Silme - Onay Korumalı (Iframe Sandbox Uyumlu Inline Silme) */}
-      <td className="p-2.5 text-right whitespace-nowrap">
+      {/* Aralık girişleri */}
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-[10px] text-stone-500 font-mono block mb-1">Min USDT</label>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={localMin}
+            onChange={(e) => setLocalMin(e.target.value)}
+            onBlur={commitMin}
+            onKeyDown={(e) => onEscape(e, () => setLocalMin(bucket.minValue.toString()))}
+            className="w-full px-2.5 py-2 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg text-xs font-mono focus:border-rose-500 focus:outline-hidden"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-stone-500 font-mono block mb-1">Max USDT</label>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={localMax}
+            onChange={(e) => setLocalMax(e.target.value)}
+            onBlur={commitMax}
+            onKeyDown={(e) => onEscape(e, () => setLocalMax(bucket.maxValue.toString()))}
+            className="w-full px-2.5 py-2 bg-stone-50 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 rounded-lg text-xs font-mono focus:border-rose-500 focus:outline-hidden"
+          />
+        </div>
+      </div>
+
+      {/* Alt satır: renk, tür, sil */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="color"
+            value={localColor}
+            aria-label="Kova rengi"
+            onChange={(e) => { setLocalColor(e.target.value); onSaveUpdate({ color: e.target.value }); }}
+            className="w-8 h-8 p-0 rounded-lg border-0 cursor-pointer"
+          />
+          <button
+            type="button"
+            onClick={onToggleSmart}
+            className={`h-8 px-2.5 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+              bucket.isSmartMoney
+                ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                : 'bg-stone-100 dark:bg-stone-800 text-stone-500 border-stone-200 dark:border-stone-700'
+            }`}
+          >
+            {bucket.isSmartMoney ? 'Smart' : 'Retail'}
+          </button>
+        </div>
+
         {isDeleting ? (
-          <div className="inline-flex items-center gap-1 bg-rose-50 dark:bg-rose-950/80 p-1 rounded-lg border border-rose-200 dark:border-rose-800 animate-in fade-in">
+          <div className="flex items-center gap-1.5 bg-rose-50 dark:bg-rose-950/80 p-1 rounded-xl border border-rose-200 dark:border-rose-800">
             <span className="text-[10px] font-bold text-rose-700 dark:text-rose-300 px-1">Silinsin mi?</span>
-            <button
-              type="button"
-              onClick={onConfirmDelete}
-              className="px-2 py-0.5 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors shadow-xs"
-            >
-              Evet
-            </button>
-            <button
-              type="button"
-              onClick={onCancelDelete}
-              className="px-1.5 py-0.5 bg-stone-200 dark:bg-stone-700 hover:bg-stone-300 text-stone-700 dark:text-stone-300 rounded text-[10px] font-bold cursor-pointer transition-colors"
-            >
-              Vazgeç
-            </button>
+            <button type="button" onClick={onConfirmDelete} className="h-7 px-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-bold cursor-pointer">Evet</button>
+            <button type="button" onClick={onCancelDelete} className="h-7 px-2 bg-stone-200 dark:bg-stone-700 hover:bg-stone-300 text-stone-700 dark:text-stone-300 rounded-lg text-[10px] font-bold cursor-pointer">Vazgeç</button>
           </div>
         ) : (
           <button
             type="button"
             onClick={onStartDelete}
-            className="p-1 text-stone-400 hover:text-rose-600 transition-colors cursor-pointer"
-            title="Kovayı Sil"
+            aria-label="Kovayı sil"
+            className="h-9 w-9 grid place-items-center rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
           >
             <Trash2 className="w-4 h-4" />
           </button>
         )}
-      </td>
-    </tr>
+      </div>
+    </div>
   );
-});
+};
 
 // ------------------------------------------------------------------------
-// ⚙️ ANA SETTINGS VIEW BİLEŞENİ
+// ⚙️ ANA SETTINGS VIEW
 // ------------------------------------------------------------------------
 export const SettingsView: React.FC<SettingsViewProps> = ({
   bucketManager,
@@ -367,7 +259,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
   onRefreshCustomBuckets,
 }) => {
-  // Yeni kova ekleme form state
   const [newName, setNewName] = useState('');
   const [newMin, setNewMin] = useState('1000');
   const [newMax, setNewMax] = useState('5000');
@@ -375,52 +266,61 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [newColor, setNewColor] = useState('#EC4899');
   const [newIsSmart, setNewIsSmart] = useState(false);
   const [formError, setFormError] = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
 
-  // Silme işlemi için inline state
   const [deletingBucketId, setDeletingBucketId] = useState<string | null>(null);
-
-  // Sıfırlama modalı
   const [showResetModal, setShowResetModal] = useState(false);
-
-  // İçe/Dışa Aktar state
   const [jsonImportText, setJsonImportText] = useState('');
   const [copySuccess, setCopySuccess] = useState(false);
-  const copyTimeoutRef = useRef<any>(null);
 
-  // Toast bildirim state & deterministik timer
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-
-  useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => {
-      setToast(null);
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [toast]);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
-    };
-  }, []);
+  const [toast, setToast] = useState<{ id: number; message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ message, type });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    const id = Date.now();
+    setToast({ id, message, type });
+    toastTimer.current = setTimeout(() => {
+      setToast((curr) => (curr?.id === id ? null : curr));
+    }, 3000);
   }, []);
 
-  // Kova Ekleme İşleyicisi (Domain Validation Entegrasyonu)
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+
+  // Çakışan kova id seti — her satırda O(n) yeniden hesaplamak yerine tek geçişte
+  const overlapIds = useMemo(() => {
+    const ids = new Set<string>();
+    const active = customBuckets.filter((b) => b.isActive);
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i], b = active[j];
+        if (a.minValue < b.maxValue && a.maxValue > b.minValue) { ids.add(a.id); ids.add(b.id); }
+      }
+    }
+    return ids;
+  }, [customBuckets]);
+
   const handleCreateBucket = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
 
+    const trimmedName = newName.trim();
     const minVal = parseFloat(newMin);
     const maxVal = parseFloat(newMax);
 
+    if (!trimmedName) { setFormError('Kova adı boş bırakılamaz.'); return; }
+    if (isNaN(minVal) || isNaN(maxVal) || minVal < 0 || maxVal <= minVal) {
+      setFormError('Geçerli bir tutar aralığı girin (Min < Max).');
+      return;
+    }
+    const isDuplicate = customBuckets.some((b) => b.name.trim().toLowerCase() === trimmedName.toLowerCase());
+    if (isDuplicate) { setFormError('Bu isimde bir kova zaten var.'); return; }
+
     const result = bucketManager.createManualBucket({
-      name: newName.trim(),
+      name: trimmedName,
       minValue: minVal,
       maxValue: maxVal,
-      icon: newIcon.trim() || '💎',
+      icon: clampIcon(newIcon),
       color: newColor,
       isActive: true,
       isSmartMoney: newIsSmart,
@@ -428,170 +328,142 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
     if (result.success) {
       setNewName('');
-      setNewMin(maxVal.toString());
-      setNewMax((maxVal * 2).toString());
+      const nextMin = maxVal > 0 ? maxVal : 1000;
+      setNewMin(nextMin.toString());
+      setNewMax((nextMin * 2).toString());
       onRefreshCustomBuckets();
       soundEngine.playSignalChime('alert');
-      showToast(`"${newName.trim()}" kovası başarıyla eklendi!`);
+      showToast(`"${trimmedName}" kovası eklendi`);
     } else {
-      setFormError(result.message);
+      setFormError(result.message || `Maksimum ${bucketManager.maxCustomBuckets} kova sınırına ulaşıldı.`);
     }
   };
 
-  // Otomatik 100 Kovaya Genişletme (Net İsim & Geri Bildirim)
   const handleAutoExpand = () => {
     const result = bucketManager.expandTo100Buckets();
     if (result.success) {
       onRefreshCustomBuckets();
       soundEngine.playSignalChime('bull');
-      showToast(`Kovalar ${result.count} dilimlik logaritmik algoritmaya genişletildi!`);
+      showToast('Kovalar 100 dilimlik algoritmaya genişletildi');
     } else {
       showToast(result.message, 'error');
     }
   };
 
-  // Sıfırlama Onayı
   const executeReset = () => {
     bucketManager.resetCustomBuckets();
     onRefreshCustomBuckets();
     setShowResetModal(false);
-    showToast('Tüm özel kovalar varsayılana sıfırlandı.', 'info');
+    showToast('Tüm özel kovalar varsayılana sıfırlandı', 'info');
   };
 
-  // Silme Onayı
-  const executeDeleteBucket = (id: string) => {
-    const res = bucketManager.removeCustomBucket(id);
+  const executeDeleteBucket = (id: string, name: string) => {
+    bucketManager.removeCustomBucket(id);
     onRefreshCustomBuckets();
     setDeletingBucketId(null);
-    if (res.success) {
-      showToast(`"${res.removedName || 'Kova'}" silindi.`, 'info');
-    }
+    showToast(`"${name}" kovası silindi`, 'info');
   };
 
-  // Güvenli JSON Dışa Aktarma (Clipboard API + Fallback + Try/Catch)
   const handleExportJson = async () => {
-    try {
-      const data = bucketManager.exportCustomBuckets();
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(data);
-      } else {
-        // Fallback: execCommand
-        const textArea = document.createElement('textarea');
-        textArea.value = data;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
-      }
+    const data = bucketManager.exportCustomBuckets();
+    const ok = await clipboardCopy(data);
+    if (ok) {
       setCopySuccess(true);
-      showToast('Kova JSON konfigürasyonu panoya kopyalandı!');
-      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
-      copyTimeoutRef.current = setTimeout(() => setCopySuccess(false), 2000);
-    } catch (e) {
-      showToast('Panoya kopyalama başarısız oldu.', 'error');
+      showToast('Kova JSON konfigürasyonu panoya kopyalandı');
+      setTimeout(() => setCopySuccess(false), 2000);
+    } else {
+      showToast('Kopyalama başarısız — panoya erişim engellendi', 'error');
     }
   };
 
-  // JSON İçe Aktarma - Şema Hata Mesajı Gösterimi
   const handleImportJson = () => {
     if (!jsonImportText.trim()) return;
-    const result = bucketManager.importCustomBuckets(jsonImportText);
-    if (result.success) {
-      setJsonImportText('');
-      onRefreshCustomBuckets();
-      showToast(`${result.count} kova başarıyla içe aktarıldı!`, 'success');
-    } else {
-      showToast(result.message, 'error');
+    try {
+      const result = bucketManager.importCustomBuckets(jsonImportText);
+      if (result.success) {
+        setJsonImportText('');
+        onRefreshCustomBuckets();
+        showToast('Kovalar başarıyla içe aktarıldı');
+      } else {
+        showToast(result.message || 'Geçersiz JSON formatı', 'error');
+      }
+    } catch {
+      showToast('İçe aktarma sırasında hata oluştu', 'error');
     }
   };
 
-  const parsedNewMin = parseFloat(newMin);
-  const parsedNewMax = parseFloat(newMax);
-
   return (
-    <div className="space-y-5 relative pb-[env(safe-area-inset-bottom)]">
-      {/* TOAST BİLDİRİM BİLEŞENİ */}
+    <div className="space-y-5 relative pb-6">
+      {/* TOAST — üstte, safe-area uyumlu, tek örnek */}
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 animate-bounce">
-          <div className={`px-4 py-2.5 rounded-xl shadow-lg border flex items-center gap-2 text-xs font-bold ${
-            toast.type === 'success' 
-              ? 'bg-emerald-600 text-white border-emerald-500' 
-              : toast.type === 'error'
-              ? 'bg-rose-600 text-white border-rose-500'
-              : 'bg-stone-900 text-white border-stone-800 dark:bg-stone-100 dark:text-stone-900'
-          }`}>
-            <span>{toast.message}</span>
-            <button type="button" onClick={() => setToast(null)} className="ml-2 hover:opacity-80 cursor-pointer">
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-3 left-3 right-3 z-50 flex justify-center pointer-events-none"
+          style={{ paddingTop: 'env(safe-area-inset-top)' }}
+        >
+          <div
+            className={`pointer-events-auto max-w-sm w-full px-4 py-2.5 rounded-xl shadow-lg border flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-top-2 ${
+              toast.type === 'success'
+                ? 'bg-emerald-600 text-white border-emerald-500'
+                : toast.type === 'error'
+                ? 'bg-rose-600 text-white border-rose-500'
+                : 'bg-stone-900 text-white border-stone-800 dark:bg-stone-100 dark:text-stone-900'
+            }`}
+          >
+            <span className="flex-1">{toast.message}</span>
+            <button type="button" aria-label="Kapat" onClick={() => setToast(null)} className="shrink-0 hover:opacity-80">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
       )}
 
-      {/* SIFIRLAMA ONAY MODALI (IFRAME UYUMLU) */}
+      {/* SIFIRLAMA ONAY MODALI */}
       {showResetModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-4">
           <div className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
             <div className="flex items-center gap-2.5 text-rose-600">
               <AlertTriangle className="w-6 h-6" />
               <h3 className="text-sm font-black text-stone-900 dark:text-stone-100">Kovaları Sıfırla?</h3>
             </div>
             <p className="text-xs text-stone-600 dark:text-stone-400">
-              Tüm özel kovalar varsayılan temiz duruma dönecektir. Yaptığınız değişiklikler silinecektir.
+              Tüm özel kovalar varsayılan logaritmik yapıya dönecek. Yaptığınız değişiklikler silinecek.
             </p>
             <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowResetModal(false)}
-                className="px-3 py-1.5 rounded-xl text-xs font-bold text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800 cursor-pointer"
-              >
-                Vazgeç
-              </button>
-              <button
-                type="button"
-                onClick={executeReset}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-xs cursor-pointer"
-              >
-                Evet, Sıfırla
-              </button>
+              <button type="button" onClick={() => setShowResetModal(false)} className="h-10 px-3.5 rounded-xl text-xs font-bold text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800 cursor-pointer">Vazgeç</button>
+              <button type="button" onClick={executeReset} className="h-10 px-4 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-xs cursor-pointer">Evet, Sıfırla</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 1. SİSTEM & ARAYÜZ YAPILANDIRMASI */}
-      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-4">
+      {/* 1. SİSTEM & ARAYÜZ */}
+      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-4">
         <div className="flex items-center gap-2">
           <Cpu className="w-5 h-5 text-rose-500" />
-          <h2 className="text-base font-black text-stone-900 dark:text-stone-100">
-            Sistem & Performans Yapılandırması
-          </h2>
+          <h2 className="text-base font-black text-stone-900 dark:text-stone-100">Sistem & Performans Yapılandırması</h2>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
-          {/* Ring Buffer Derinliği - Domain üzerinden Atomik Güncelleme */}
           <div className="p-3.5 rounded-xl bg-stone-50 dark:bg-stone-800/80 border border-stone-200 dark:border-stone-700 space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-stone-800 dark:text-stone-200">
-                Ring Buffer Boyutu (İşlem Belleği)
-              </span>
-              <span className="text-xs font-mono font-black text-rose-600 dark:text-rose-400 tabular-nums">
-                {appSettings.bufferSize.toLocaleString()}
-              </span>
+              <span className="text-xs font-bold text-stone-800 dark:text-stone-200">Ring Buffer Boyutu</span>
+              <span className="text-xs font-mono font-black text-rose-600 dark:text-rose-400">{appSettings.bufferSize.toLocaleString()}</span>
             </div>
-            <div className="flex gap-1.5 flex-wrap">
+            <div className="grid grid-cols-5 gap-1.5">
               {[500, 1000, 2000, 5000, 10000].map((size) => (
                 <button
                   key={size}
                   type="button"
                   onClick={() => {
-                    const validSize = bucketManager.setBufferSize(size);
-                    onUpdateSettings({ bufferSize: validSize });
-                    showToast(`Ring Buffer ${validSize.toLocaleString()} boyuta ayarlandı`);
+                    bucketManager.setBufferSize(size);
+                    onUpdateSettings({ bufferSize: size });
+                    showToast(`Ring Buffer ${size.toLocaleString()} boyuta ayarlandı`);
                   }}
-                  className={`flex-1 min-w-[55px] py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
+                  className={`h-9 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                     appSettings.bufferSize === size
-                      ? 'bg-rose-600 text-white shadow-xs'
+                      ? 'bg-rose-600 text-white shadow-2xs'
                       : 'bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300 border border-stone-200 dark:border-stone-600 hover:bg-rose-50'
                   }`}
                 >
@@ -599,29 +471,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </button>
               ))}
             </div>
-            <p className="text-[10px] text-stone-500 dark:text-stone-400">
-              Quantile P70/P90/P98 hesaplamalarında kullanılan dinamik kayan pencere
-            </p>
+            <p className="text-[10px] text-stone-500 dark:text-stone-400">P70/P90/P98 hesaplamalarında kullanılan dinamik kayan pencere</p>
           </div>
 
-          {/* Tema ve Ses */}
           <div className="p-3.5 rounded-xl bg-stone-50 dark:bg-stone-800/80 border border-stone-200 dark:border-stone-700 space-y-2">
-            <span className="text-xs font-bold text-stone-800 dark:text-stone-200 block">
-              Görsel & Ses Tercihleri
-            </span>
-            <div className="flex gap-2">
+            <span className="text-xs font-bold text-stone-800 dark:text-stone-200 block">Görsel & Ses Tercihleri</span>
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  const nextTheme = appSettings.theme === 'dark' ? 'light' : 'dark';
-                  onUpdateSettings({ theme: nextTheme });
-                }}
-                className="flex-1 py-2 px-3 rounded-lg text-xs font-bold border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-700 text-stone-800 dark:text-stone-200 flex items-center justify-center gap-1.5 transition-colors hover:bg-rose-50 dark:hover:bg-stone-600 cursor-pointer"
+                onClick={() => onUpdateSettings({ theme: appSettings.theme === 'dark' ? 'light' : 'dark' })}
+                className="h-10 rounded-lg text-xs font-bold border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-700 text-stone-800 dark:text-stone-200 flex items-center justify-center gap-1.5 transition-colors hover:bg-rose-50 dark:hover:bg-stone-600 cursor-pointer"
               >
                 {appSettings.theme === 'dark' ? <Moon className="w-3.5 h-3.5 text-indigo-400" /> : <Sun className="w-3.5 h-3.5 text-amber-500" />}
-                <span>{appSettings.theme === 'dark' ? 'Karanlık Mod' : 'Aydınlık Mod'}</span>
+                <span>{appSettings.theme === 'dark' ? 'Karanlık' : 'Aydınlık'}</span>
               </button>
-
               <button
                 type="button"
                 onClick={() => {
@@ -630,251 +493,186 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   soundEngine.setMuted(!nextSound);
                   if (nextSound) soundEngine.playSignalChime('bull');
                 }}
-                className="flex-1 py-2 px-3 rounded-lg text-xs font-bold border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-700 text-stone-800 dark:text-stone-200 flex items-center justify-center gap-1.5 transition-colors hover:bg-rose-50 dark:hover:bg-stone-600 cursor-pointer"
+                className="h-10 rounded-lg text-xs font-bold border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-700 text-stone-800 dark:text-stone-200 flex items-center justify-center gap-1.5 transition-colors hover:bg-rose-50 dark:hover:bg-stone-600 cursor-pointer"
               >
                 {appSettings.soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-emerald-500" /> : <VolumeX className="w-3.5 h-3.5 text-stone-400" />}
-                <span>{appSettings.soundEnabled ? 'Ses: Açık' : 'Ses: Kapalı'}</span>
+                <span>{appSettings.soundEnabled ? 'Açık' : 'Kapalı'}</span>
               </button>
             </div>
-            <p className="text-[10px] text-stone-500 dark:text-stone-400">
-              Web Audio sentezleyici ile Boğa Emilimi / Dağıtım tespitinde anlık bildirim tonu
-            </p>
+            <p className="text-[10px] text-stone-500 dark:text-stone-400">Boğa Emilimi / Dağıtım tespitinde anlık bildirim tonu</p>
           </div>
         </div>
       </section>
 
-      {/* 2. KOVA YÖNETİMİ & 100 KOVA KERNEL GENİŞLETİCİ */}
-      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+      {/* 2. KOVA YÖNETİMİ */}
+      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-4">
+        <div className="flex items-center justify-between gap-2.5">
           <div className="flex items-center gap-2">
             <Sliders className="w-5 h-5 text-rose-500" />
-            <h2 className="text-base font-black text-stone-900 dark:text-stone-100">
-              Özel Kova Yönetimi (Maksimum 100 Dilim)
-            </h2>
+            <h2 className="text-base font-black text-stone-900 dark:text-stone-100">Özel Kovalar ({customBuckets.length}/100)</h2>
           </div>
-
-          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-            <button
-              type="button"
-              onClick={handleAutoExpand}
-              className="px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/70 hover:bg-amber-100 text-amber-900 dark:text-amber-200 text-xs font-bold border border-amber-300 dark:border-amber-700 flex items-center gap-1.5 transition-colors cursor-pointer active:scale-95"
-            >
-              <Zap className="w-3.5 h-3.5 text-amber-500" />
-              <span>100 Kova Otomatik Genişlet ({customBuckets.length}/100)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowResetModal(true)}
-              className="px-3 py-1.5 rounded-xl bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 text-stone-700 dark:text-stone-300 text-xs font-bold border border-stone-200 dark:border-stone-700 flex items-center gap-1.5 transition-colors cursor-pointer active:scale-95"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-stone-500" />
-              <span>Sıfırla</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowResetModal(true)}
+            aria-label="Kovaları sıfırla"
+            className="h-9 w-9 grid place-items-center rounded-lg bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 text-stone-500 border border-stone-200 dark:border-stone-700 cursor-pointer"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* Bucket Spektrum Dağılım Çubuğu */}
-        <BucketDistributionPreview
-          buckets={customBuckets}
-          proposedMin={!isNaN(parsedNewMin) && parsedNewMin >= 0 ? parsedNewMin : undefined}
-          proposedMax={!isNaN(parsedNewMax) && parsedNewMax > parsedNewMin ? parsedNewMax : undefined}
-          proposedSmart={newIsSmart}
-        />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={handleAutoExpand}
+            className="h-11 rounded-xl bg-amber-50 dark:bg-amber-950/70 hover:bg-amber-100 text-amber-900 dark:text-amber-200 text-xs font-bold border border-amber-300 dark:border-amber-700 flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-500" />
+            <span>100'e Genişlet</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowAddForm((v) => !v)}
+            className="h-11 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{showAddForm ? 'Formu Kapat' : 'Yeni Kova'}</span>
+          </button>
+        </div>
 
-        {/* Yeni Kova Ekleme Formu */}
-        <form onSubmit={handleCreateBucket} className="p-3.5 rounded-xl bg-stone-50 dark:bg-stone-800/80 border border-stone-200 dark:border-stone-700 space-y-3">
-          <span className="text-xs font-bold text-stone-800 dark:text-stone-200 block">
-            + Yeni Özel Kova Ekle
-          </span>
-
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-            <div className="col-span-2 sm:col-span-2">
+        {/* Yeni Kova Formu (mobilde açılır/kapanır) */}
+        {showAddForm && (
+          <form onSubmit={handleCreateBucket} className="p-3.5 rounded-xl bg-stone-50 dark:bg-stone-800/80 border border-stone-200 dark:border-stone-700 space-y-3">
+            <div>
               <label className="text-[10px] text-stone-500 font-mono block mb-1">Kova Adı</label>
               <input
                 type="text"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder="Örn: Balina Avcısı"
-                className="w-full px-2.5 py-1.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
+                className="w-full h-10 px-2.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-xs text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
               />
             </div>
 
-            <div>
-              <label className="text-[10px] text-stone-500 font-mono block mb-1">Min USDT</label>
-              <input
-                type="number"
-                value={newMin}
-                onChange={(e) => setNewMin(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-stone-900 dark:text-stone-100 font-mono tabular-nums focus:border-rose-500 focus:outline-hidden"
-              />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] text-stone-500 font-mono block mb-1">Min USDT</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={newMin}
+                  onChange={(e) => setNewMin(e.target.value)}
+                  className="w-full h-10 px-2.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-xs font-mono text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-stone-500 font-mono block mb-1">Maks USDT</label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={newMax}
+                  onChange={(e) => setNewMax(e.target.value)}
+                  className="w-full h-10 px-2.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-xs font-mono text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
+                />
+              </div>
             </div>
 
-            <div>
-              <label className="text-[10px] text-stone-500 font-mono block mb-1">Maks USDT</label>
-              <input
-                type="number"
-                value={newMax}
-                onChange={(e) => setNewMax(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-stone-900 dark:text-stone-100 font-mono tabular-nums focus:border-rose-500 focus:outline-hidden"
-              />
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-stone-500 font-mono">İkon</span>
+                <input
+                  type="text"
+                  value={newIcon}
+                  onChange={(e) => setNewIcon(e.target.value)}
+                  onBlur={() => setNewIcon(clampIcon(newIcon))}
+                  className="w-12 h-9 text-center bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg focus:border-rose-500 focus:outline-hidden"
+                />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-stone-500 font-mono">Renk</span>
+                <input
+                  type="color"
+                  value={newColor}
+                  onChange={(e) => setNewColor(e.target.value)}
+                  className="w-9 h-9 p-0 rounded-lg border border-stone-300 dark:border-stone-600 cursor-pointer"
+                />
+              </div>
+              <label className="flex items-center gap-1.5 cursor-pointer text-stone-700 dark:text-stone-300 ml-auto">
+                <input type="checkbox" checked={newIsSmart} onChange={(e) => setNewIsSmart(e.target.checked)} className="w-4 h-4 rounded text-rose-600 focus:ring-rose-500 cursor-pointer" />
+                <span className="text-[10px] font-semibold">Smart Money</span>
+              </label>
             </div>
 
-            <div className="flex items-end col-span-2 sm:col-span-1">
-              <button
-                type="submit"
-                className="w-full py-1.5 px-3 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold flex items-center justify-center gap-1 shadow-xs transition-colors cursor-pointer active:scale-95"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Ekle</span>
-              </button>
-            </div>
-          </div>
+            {formError && <p className="text-xs text-rose-600 dark:text-rose-400 font-bold">{formError}</p>}
 
-          <div className="flex flex-wrap items-center gap-4 text-xs">
-            <label className="flex items-center gap-1.5 cursor-pointer text-stone-700 dark:text-stone-300">
-              <input
-                type="checkbox"
-                checked={newIsSmart}
-                onChange={(e) => setNewIsSmart(e.target.checked)}
-                className="rounded text-rose-600 focus:ring-rose-500 cursor-pointer"
+            <button type="submit" className="w-full h-11 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer shadow-xs">
+              Kovayı Ekle
+            </button>
+          </form>
+        )}
+
+        {/* Kova Listesi — kart tabanlı, tüm ekran boyutlarında okunur */}
+        <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+          {customBuckets.length === 0 ? (
+            <p className="text-xs text-stone-500 text-center py-6">Henüz özel kova yok. "Yeni Kova" ile ekleyin.</p>
+          ) : (
+            customBuckets.map((b) => (
+              <EditableBucketRow
+                key={b.id}
+                bucket={b}
+                isDeleting={deletingBucketId === b.id}
+                isOverlap={overlapIds.has(b.id)}
+                onStartDelete={() => setDeletingBucketId(b.id)}
+                onCancelDelete={() => setDeletingBucketId(null)}
+                onConfirmDelete={() => executeDeleteBucket(b.id, b.name)}
+                onToggleActive={() => { bucketManager.toggleBucketActive(b.id); onRefreshCustomBuckets(); }}
+                onToggleSmart={() => { bucketManager.updateCustomBucket(b.id, { isSmartMoney: !b.isSmartMoney }); onRefreshCustomBuckets(); }}
+                onSaveUpdate={(updates) => {
+                  bucketManager.updateCustomBucket(b.id, updates);
+                  onRefreshCustomBuckets();
+                  showToast(`"${b.name}" güncellendi`);
+                }}
               />
-              <span className="font-semibold">Bu Kova "Smart Money" Olarak Sayılsın</span>
-            </label>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-stone-500 font-mono">İkon:</span>
-              <input
-                type="text"
-                value={newIcon}
-                maxLength={8}
-                onChange={(e) => setNewIcon(e.target.value)}
-                className="w-12 px-1.5 py-0.5 text-center bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded focus:border-rose-500 focus:outline-hidden"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-stone-500 font-mono">Renk:</span>
-              <input
-                type="color"
-                value={newColor}
-                onChange={(e) => setNewColor(e.target.value)}
-                className="w-7 h-7 p-0 rounded-md border border-stone-300 dark:border-stone-600 cursor-pointer"
-              />
-            </div>
-          </div>
-
-          {formError && (
-            <p className="text-xs text-rose-600 dark:text-rose-400 font-bold">{formError}</p>
+            ))
           )}
-        </form>
-
-        {/* Mevcut Özel Kovalar Tablosu */}
-        <div className="overflow-x-auto max-h-[400px] overflow-y-auto border border-stone-200 dark:border-stone-800 rounded-xl">
-          <table className="w-full text-left text-xs font-mono min-w-[620px] border-collapse">
-            <thead className="bg-stone-100 dark:bg-stone-800 text-stone-500 dark:text-stone-400 sticky top-0 z-10">
-              <tr>
-                <th className="p-2.5">İkon & Ad</th>
-                <th className="p-2.5">Min USDT</th>
-                <th className="p-2.5">Max USDT</th>
-                <th className="p-2.5">Renk</th>
-                <th className="p-2.5">Tür</th>
-                <th className="p-2.5">Durum</th>
-                <th className="p-2.5 text-right">Sil</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
-              {customBuckets.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="py-6 text-center text-stone-400 font-sans text-xs">
-                    Henüz özel kova tanımlanmadı. Yukarıdaki formdan ekleyebilir veya otomatik genişletebilirsiniz.
-                  </td>
-                </tr>
-              ) : (
-                customBuckets.map((b, idx) => {
-                  // Çakışma kontrolü
-                  const hasOverlap = customBuckets.some(
-                    (other, oIdx) =>
-                      oIdx !== idx &&
-                      b.isActive &&
-                      other.isActive &&
-                      b.minValue < other.maxValue &&
-                      b.maxValue > other.minValue
-                  );
-
-                  return (
-                    <EditableBucketRow
-                      key={b.id}
-                      bucket={b}
-                      isDeleting={deletingBucketId === b.id}
-                      isOverlap={hasOverlap}
-                      onStartDelete={() => setDeletingBucketId(b.id)}
-                      onCancelDelete={() => setDeletingBucketId(null)}
-                      onConfirmDelete={() => executeDeleteBucket(b.id)}
-                      onToggleActive={() => {
-                        bucketManager.toggleBucketActive(b.id);
-                        onRefreshCustomBuckets();
-                      }}
-                      onToggleSmart={() => {
-                        bucketManager.updateCustomBucket(b.id, { isSmartMoney: !b.isSmartMoney });
-                        onRefreshCustomBuckets();
-                      }}
-                      onSaveUpdate={(updates) => {
-                        const res = bucketManager.updateCustomBucket(b.id, updates);
-                        onRefreshCustomBuckets();
-                        if (res.success) {
-                          showToast(`"${b.name}" güncellendi`);
-                        } else {
-                          showToast(res.message, 'error');
-                        }
-                      }}
-                    />
-                  );
-                })
-              )}
-            </tbody>
-          </table>
         </div>
       </section>
 
-      {/* 3. VERİ YEDEKLEME & JSON İÇE/DIŞA AKTAR */}
-      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-sm space-y-3">
+      {/* 3. YEDEKLEME */}
+      <section className="bg-white/95 dark:bg-stone-900 p-4 sm:p-5 rounded-2xl border border-pink-200/80 dark:border-stone-800 shadow-xs space-y-3">
         <div className="flex items-center gap-2">
           <Download className="w-5 h-5 text-rose-500" />
-          <h2 className="text-base font-black text-stone-900 dark:text-stone-100">
-            Kova Yapılandırma Yedekleme (JSON)
-          </h2>
+          <h2 className="text-base font-black text-stone-900 dark:text-stone-100">Kova Yapılandırma Yedekleme</h2>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+        <div className="grid grid-cols-1 gap-3 pt-1">
           <div className="space-y-2 p-3 bg-stone-50 dark:bg-stone-800/80 rounded-xl border border-stone-200 dark:border-stone-700">
             <span className="text-xs font-bold text-stone-800 dark:text-stone-200 block">Dışa Aktar</span>
-            <p className="text-[11px] text-stone-500 dark:text-stone-400">
-              Mevcut {customBuckets.length} özel kovanızı JSON olarak panoya kopyalayın
-            </p>
+            <p className="text-[11px] text-stone-500 dark:text-stone-400">{customBuckets.length} özel kovayı JSON olarak panoya kopyala</p>
             <button
               type="button"
               onClick={handleExportJson}
-              className="w-full py-2 px-3 rounded-lg bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer hover:opacity-90 active:scale-95 transition-all shadow-xs"
+              className="w-full h-11 rounded-lg bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer hover:opacity-90"
             >
               {copySuccess ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-              <span>{copySuccess ? 'Kopyalandı!' : 'JSON Formatında Kopyala'}</span>
+              <span>{copySuccess ? 'Kopyalandı' : 'JSON Kopyala'}</span>
             </button>
           </div>
 
           <div className="space-y-2 p-3 bg-stone-50 dark:bg-stone-800/80 rounded-xl border border-stone-200 dark:border-stone-700">
             <span className="text-xs font-bold text-stone-800 dark:text-stone-200 block">İçe Aktar</span>
             <textarea
-              rows={2}
+              rows={3}
               placeholder="Yapıştırılacak JSON verisi..."
               value={jsonImportText}
               onChange={(e) => setJsonImportText(e.target.value)}
-              className="w-full p-2 text-xs font-mono bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden"
+              className="w-full p-2.5 text-xs font-mono bg-white dark:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg text-stone-900 dark:text-stone-100 focus:border-rose-500 focus:outline-hidden resize-none"
             />
             <button
               type="button"
               onClick={handleImportJson}
-              className="w-full py-1.5 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-95 transition-all"
+              disabled={!jsonImportText.trim()}
+              className="w-full h-11 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
             >
               <Upload className="w-3.5 h-3.5" />
               <span>İçe Aktar ve Uygula</span>
