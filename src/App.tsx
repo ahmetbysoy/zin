@@ -566,7 +566,6 @@ export default function App() {
         <div className={activeTab === 'chart' ? 'w-full h-full p-0 m-0' : 'hidden'}>
           <TradingViewChart
             symbol={activeSymbol || 'BTCUSDT'}
-            wsManager={wsManagerRef.current!}
             onBackToDashboard={() => setActiveTab('dashboard')}
             isDark={appSettings.theme === 'dark'}
             isActive={activeTab === 'chart'}
