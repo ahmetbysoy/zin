@@ -19,6 +19,18 @@ export interface CustomBucket {
   isSmartMoney?: boolean;
 }
 
+export type BucketOperationFailReason = 
+  | 'LIMIT' 
+  | 'OVERLAP' 
+  | 'INVALID_RANGE' 
+  | 'INVALID_SCHEMA' 
+  | 'EMPTY_NAME'
+  | 'DUPLICATE_ID';
+
+export type BucketOperationResult = 
+  | { success: true; bucket?: CustomBucket; count?: number }
+  | { success: false; reason: BucketOperationFailReason; message: string };
+
 export interface BucketThresholds {
   shrimpMax: number;
   crabMax: number;

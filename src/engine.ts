@@ -1,6 +1,8 @@
 import { 
   AllBucketTypes, 
   BucketKey, 
+  BucketOperationFailReason,
+  BucketOperationResult,
   BucketStats, 
   BucketThresholds, 
   CustomBucket, 
@@ -287,16 +289,27 @@ export class BucketManager {
     return buckets;
   }
 
-  // Otomatik 100 Bucket Ekleme
-  addCustomBucket(): boolean {
+  // Ring Buffer Boyutunu Atomik Güncelle
+  setBufferSize(newSize: number): number {
+    const validSize = Math.max(100, Math.min(20000, Math.round(newSize)));
+    this.ringBuffer.resize(validSize);
+    return validSize;
+  }
+
+  // Otomatik 100 Kovaya Genişletme (Açık ve Anlamlı İsimlendirme)
+  expandTo100Buckets(): BucketOperationResult {
     if (this.customBuckets.length >= this.maxCustomBuckets) {
-      return false;
+      return {
+        success: false,
+        reason: 'LIMIT',
+        message: `Zaten maksimum ${this.maxCustomBuckets} kova sınırına ulaşıldı.`,
+      };
     }
 
     const rawValues = this.ringBuffer.getValues().filter((v) => v > 0);
     const values = rawValues.length >= 10 ? rawValues : this.generateSampleValues(500);
 
-    let targetCount = Math.min(this.customBuckets.length * 2, this.maxCustomBuckets);
+    let targetCount = Math.min(Math.max(this.customBuckets.length * 2, 20), this.maxCustomBuckets);
     if (targetCount === this.customBuckets.length) {
       targetCount = Math.min(this.customBuckets.length + 10, this.maxCustomBuckets);
     }
@@ -322,16 +335,66 @@ export class BucketManager {
 
     this.ensureStatsKeys();
     this.saveToStorage();
-    return true;
+    return { success: true, count: this.customBuckets.length };
   }
 
-  // Manuel Özel Bucket Ekleme
-  createManualBucket(bucket: Omit<CustomBucket, 'id' | 'tradeCount' | 'volume'>): boolean {
-    if (this.customBuckets.length >= this.maxCustomBuckets) return false;
-    if (bucket.minValue >= bucket.maxValue) return false;
+  // Geriye dönük uyumluluk için alias
+  addCustomBucket(): boolean {
+    const res = this.expandTo100Buckets();
+    return res.success;
+  }
+
+  // Manuel Özel Bucket Ekleme - Kapsamlı Domain Doğrulaması
+  createManualBucket(bucket: Omit<CustomBucket, 'id' | 'tradeCount' | 'volume'>): BucketOperationResult {
+    if (this.customBuckets.length >= this.maxCustomBuckets) {
+      return {
+        success: false,
+        reason: 'LIMIT',
+        message: `Maksimum ${this.maxCustomBuckets} kova sınırına ulaşıldı.`,
+      };
+    }
+
+    const name = bucket.name ? bucket.name.trim() : '';
+    if (!name) {
+      return {
+        success: false,
+        reason: 'EMPTY_NAME',
+        message: 'Kova adı boş bırakılamaz.',
+      };
+    }
+
+    const min = Number(bucket.minValue);
+    const max = Number(bucket.maxValue);
+
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max <= min) {
+      return {
+        success: false,
+        reason: 'INVALID_RANGE',
+        message: 'Geçersiz aralık: Minimum tutar 0 veya daha büyük, maksimumdan küçük olmalıdır.',
+      };
+    }
+
+    // Aktif özel kovalarla çakışma (overlap) denetimi
+    const hasOverlap = this.customBuckets.some(
+      (b) => b.isActive && min < b.maxValue && max > b.minValue
+    );
+
+    if (hasOverlap) {
+      return {
+        success: false,
+        reason: 'OVERLAP',
+        message: 'Bu tutar aralığı mevcut aktif bir özel kova ile çakışıyor.',
+      };
+    }
 
     const newBucket: CustomBucket = {
-      ...bucket,
+      name,
+      minValue: Math.round(min),
+      maxValue: Math.round(max),
+      color: bucket.color || '#EC4899',
+      icon: (bucket.icon ? bucket.icon.trim() : '') || '💎',
+      isActive: bucket.isActive ?? true,
+      isSmartMoney: !!bucket.isSmartMoney,
       id: `custom_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       tradeCount: 0,
       volume: 0,
@@ -340,18 +403,39 @@ export class BucketManager {
     this.customBuckets.push(newBucket);
     this.ensureStatsKeys();
     this.saveToStorage();
-    return true;
+    return { success: true, bucket: newBucket };
   }
 
-  removeCustomBucket(id: string): void {
+  removeCustomBucket(id: string): { success: boolean; removedName?: string } {
+    const target = this.customBuckets.find((b) => b.id === id);
+    if (!target) return { success: false };
+    const name = target.name;
     this.customBuckets = this.customBuckets.filter((b) => b.id !== id);
     delete this.stats[id];
     this.saveToStorage();
+    return { success: true, removedName: name };
   }
 
-  updateCustomBucket(id: string, updates: Partial<CustomBucket>): void {
-    this.customBuckets = this.customBuckets.map((b) => (b.id === id ? { ...b, ...updates } : b));
+  updateCustomBucket(id: string, updates: Partial<CustomBucket>): BucketOperationResult {
+    const targetIndex = this.customBuckets.findIndex((b) => b.id === id);
+    if (targetIndex === -1) {
+      return { success: false, reason: 'DUPLICATE_ID', message: 'Kova bulunamadı.' };
+    }
+
+    const current = this.customBuckets[targetIndex];
+    const candidate: CustomBucket = { ...current, ...updates };
+
+    if (candidate.minValue >= candidate.maxValue) {
+      return {
+        success: false,
+        reason: 'INVALID_RANGE',
+        message: 'Minimum tutar maksimum tutardan küçük olmalıdır.',
+      };
+    }
+
+    this.customBuckets[targetIndex] = candidate;
     this.saveToStorage();
+    return { success: true, bucket: candidate };
   }
 
   toggleBucketActive(id: string): void {
@@ -368,19 +452,86 @@ export class BucketManager {
     return JSON.stringify(this.customBuckets, null, 2);
   }
 
-  importCustomBuckets(jsonStr: string): boolean {
+  // JSON İçe Aktarma - Sıkı Şema ve Tip Doğrulaması (Schema Validation)
+  importCustomBuckets(jsonStr: string): BucketOperationResult {
     try {
-      const parsed = JSON.parse(jsonStr);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        this.customBuckets = parsed.slice(0, this.maxCustomBuckets);
-        this.ensureStatsKeys();
-        this.saveToStorage();
-        return true;
+      if (!jsonStr || !jsonStr.trim()) {
+        return { success: false, reason: 'INVALID_SCHEMA', message: 'JSON verisi boş.' };
       }
-    } catch (e) {
-      console.error('❌ Geçersiz JSON:', e);
+
+      const parsed = JSON.parse(jsonStr);
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        return {
+          success: false,
+          reason: 'INVALID_SCHEMA',
+          message: 'JSON verisi kova listesi (dizi) içermelidir.',
+        };
+      }
+
+      const validatedList: CustomBucket[] = [];
+      const seenIds = new Set<string>();
+
+      for (let i = 0; i < parsed.length; i++) {
+        const item = parsed[i];
+        if (typeof item !== 'object' || item === null) {
+          return {
+            success: false,
+            reason: 'INVALID_SCHEMA',
+            message: `#${i + 1} eleman geçerli bir kova nesnesi değil.`,
+          };
+        }
+
+        const name = typeof item.name === 'string' ? item.name.trim() : '';
+        const min = Number(item.minValue);
+        const max = Number(item.maxValue);
+
+        if (!name) {
+          return {
+            success: false,
+            reason: 'EMPTY_NAME',
+            message: `#${i + 1} kovasının adı boş.`,
+          };
+        }
+
+        if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max <= min) {
+          return {
+            success: false,
+            reason: 'INVALID_RANGE',
+            message: `"${name}" kovasında geçersiz tutar aralığı (${min} - ${max}).`,
+          };
+        }
+
+        const rawId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `custom_${Date.now()}_${i}`;
+        const finalId = seenIds.has(rawId) ? `${rawId}_${i}` : rawId;
+        seenIds.add(finalId);
+
+        validatedList.push({
+          id: finalId,
+          name,
+          minValue: Math.round(min),
+          maxValue: Math.round(max),
+          color: typeof item.color === 'string' && item.color.startsWith('#') ? item.color : this.getBucketColor(i),
+          icon: typeof item.icon === 'string' && item.icon.trim() ? item.icon.trim() : this.getBucketIcon(i),
+          isActive: item.isActive !== undefined ? !!item.isActive : true,
+          tradeCount: typeof item.tradeCount === 'number' ? item.tradeCount : 0,
+          volume: typeof item.volume === 'number' ? item.volume : 0,
+          isSmartMoney: !!item.isSmartMoney,
+        });
+
+        if (validatedList.length >= this.maxCustomBuckets) break;
+      }
+
+      this.customBuckets = validatedList;
+      this.ensureStatsKeys();
+      this.saveToStorage();
+      return { success: true, count: validatedList.length };
+    } catch (e: any) {
+      return {
+        success: false,
+        reason: 'INVALID_SCHEMA',
+        message: `JSON ayrıştırma hatası: ${e?.message || 'Sözdizimi bozuk'}`,
+      };
     }
-    return false;
   }
 
   setMode(newMode: 'dynamic' | 'static'): void {
