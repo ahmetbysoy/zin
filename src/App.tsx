@@ -584,6 +584,7 @@ export default function App() {
             maxTradesShown={appSettings.maxRecentTrades}
             activeSymbol={activeSymbol}
             onNavigateToWallets={() => setActiveTab('wallets')}
+            isLoading={!isRunning || connectionState === 'connecting'}
           />
         )}
 
