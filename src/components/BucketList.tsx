@@ -154,7 +154,7 @@ export const BucketList: React.FC<BucketListProps> = ({
           const bias = b.directionalBias ?? 50;
           const count = b.rollingCount ?? 0;
           const rangeFormatted = b.minValue !== undefined 
-            ? `$${b.minValue.toLocaleString()} - ${b.maxValue && b.maxValue < 999_999_999 ? '$' + b.maxValue.toLocaleString() : '∞'}`
+            ? `$${b.minValue.toLocaleString('en-US')} - ${b.maxValue && b.maxValue < 999_999_999 ? '$' + b.maxValue.toLocaleString('en-US') : '∞'}`
             : '';
 
           return (
@@ -208,10 +208,10 @@ export const BucketList: React.FC<BucketListProps> = ({
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] font-mono text-stone-500 dark:text-stone-400">
                   <span className="text-emerald-600 dark:text-emerald-400 font-bold">
-                    Alım: ${Math.round(buyVol).toLocaleString()}
+                    Alım: ${Math.round(buyVol).toLocaleString('en-US')}
                   </span>
                   <span className="text-rose-600 dark:text-rose-400 font-bold">
-                    Satım: ${Math.round(sellVol).toLocaleString()}
+                    Satım: ${Math.round(sellVol).toLocaleString('en-US')}
                   </span>
                 </div>
 

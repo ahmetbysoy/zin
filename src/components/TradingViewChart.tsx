@@ -160,7 +160,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         rightOffset: 12,
         lockVisibleTimeRangeOnResize: true,
       },
-      autoSize: true,
+      autoSize: false,
     });
 
     chartRef.current = chart;

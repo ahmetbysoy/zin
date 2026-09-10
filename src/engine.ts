@@ -166,8 +166,12 @@ export class BucketManager {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          // Eski otomatik oluşturulan sahte "custom_init_" log dilimlerini temizle
-          const cleaned = parsed.filter((b: CustomBucket) => !b.id.startsWith('custom_init_'));
+          // Eski otomatik oluşturulan sahte "custom_init_", "custom_exp_" ve "B1, B2..." log artıklarını temizle
+          const cleaned = parsed.filter((b: CustomBucket) => 
+            !b.id.startsWith('custom_init_') && 
+            !b.id.startsWith('custom_exp_') &&
+            !b.name.startsWith('B')
+          );
           if (cleaned.length > 0) {
             this.customBuckets = cleaned;
             this.ensureStatsKeys();
@@ -781,10 +785,10 @@ export class BucketManager {
     const list: BucketStats[] = [];
 
     const defaults: Array<{ key: BucketKey; name: string; icon: string; min: number; max: number; smart: boolean }> = [
-      { key: 'shrimp', name: 'Karides (Noise)', icon: '🦐', min: 0, max: this.dynamicThresholds.shrimpMax, smart: false },
-      { key: 'crab', name: 'Yengeç (Mid-Tier)', icon: '🦀', min: this.dynamicThresholds.shrimpMax, max: this.dynamicThresholds.crabMax, smart: false },
-      { key: 'whale', name: 'Balina (Smart Money)', icon: '🐋', min: this.dynamicThresholds.crabMax, max: this.dynamicThresholds.whaleMax, smart: true },
-      { key: 'leviathan', name: 'Leviathan (MM/Avcı)', icon: '🦑', min: this.dynamicThresholds.whaleMax, max: 999_999_999, smart: true },
+      { key: 'shrimp', name: 'Karides', icon: '🦐', min: 0, max: this.dynamicThresholds.shrimpMax, smart: false },
+      { key: 'crab', name: 'Yengeç', icon: '🦀', min: this.dynamicThresholds.shrimpMax, max: this.dynamicThresholds.crabMax, smart: false },
+      { key: 'whale', name: 'Balina', icon: '🐋', min: this.dynamicThresholds.crabMax, max: this.dynamicThresholds.whaleMax, smart: true },
+      { key: 'leviathan', name: 'Leviathan', icon: '🦑', min: this.dynamicThresholds.whaleMax, max: 999_999_999, smart: true },
     ];
 
     for (const d of defaults) {
